@@ -206,12 +206,11 @@ When the server forms a cluster, it:
 3. Builds each member's **peer list** (see [assignment.md](assignment.md)).
 4. Pushes `cluster_assigned` to every member over its WebSocket.
 
-**Cluster lifecycle**: a cluster exists only while it has **all its members online**. Because
-prima.cpp shards a model across nodes (each node holds a copy of the weights), a cluster with a
-missing member can't serve — the model no longer fits in the remaining memory. So when a member
-goes offline or leaves, the server **dissolves the cluster** and returns **all** members to the
-waitlist (see [assignment.md](assignment.md#cluster-dissolution)). A cluster does **not** dissolve
-on idle; it only dissolves on membership loss. There is no "persistent" half-dead cluster.
+**Cluster lifecycle**: a cluster exists only while it has **all its members online** — a cluster
+with a missing member can't serve (the model no longer fits in the remaining memory). So when a
+member goes offline or leaves, the server **dissolves the cluster** and returns **all** members to
+the waitlist (see [assignment.md](assignment.md#cluster-dissolution)). A cluster does **not**
+dissolve on idle.
 
 The waitlist condition is the only trigger for cluster formation in v0. Rebalance without full
 dissolution is v1+ (see [churn.md](churn.md)).

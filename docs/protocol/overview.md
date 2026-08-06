@@ -22,32 +22,15 @@ authenticated, negotiated peers.
 
 ## Roles
 
-- **Account** — a pure identity: a username and a password. An account is **not tied to any
-  hardware**. It owns scoped API keys and (in the future) the billing balance. An account can own
-  multiple workers.
-- **Scoped API key** — a credential issued by an account, restricted to a single scope:
-  - **worker scope** — lets a device register as a worker and provide compute.
-  - **user scope** — lets a client send inference requests (the request API itself is out of v0
-    scope; see [usage-and-accounting.md](usage-and-accounting.md)).
-- **Worker** — a distinct device entity that logs in with a **worker-scoped key**. It is
-  model-specific: in v0, **one device == one worker**, so a worker has exactly one model. A worker
-  declares `memory_allocated_mb` for that model and sits on the model's waitlist. It is what
-  actually joins clusters. Earnings accrue to the **account** that owns the worker key.
-- **Worker liveness** — a transient, heartbeat-driven property, **orthogonal to registration**. A
-  worker that stops heartbeating is marked `offline`: its **key stays valid** and its registration
-  persists, but it is **removed from the waitlist** (it can't be assigned work while offline). When
-  it heartbeats again, it is **re-added** to the waitlist with the same `worker_id` — no
-  re-registration.
-- **Pool server** — the control plane. Issues identities, maintains per-model waitlists, forms
-  clusters, and (in relay fallback) orchestrates connectivity.
-- **Cluster (ring)** — an ordered group of workers serving one model, formed when the waitlist's
-  combined `memory_allocated_mb` meets the model's requirement. prima.cpp treats members as a
-  **ring**: `peers[]` in the cluster config is an ordered list (index 0 = ring head) and the server
-  is authoritative for that order. All members must agree on the same ring for the model to
-  assemble.
-- **Relay node** — a dedicated, publicly reachable WireGuard relay. Not part of the control plane;
-  it only forwards cluster traffic when a direct path between members is unavailable. Relays are
-  separate machines, operated independently of the pool server.
+| Role          | In one line                                                              | Details                          |
+| ------------- | ------------------------------------------------------------------------ | -------------------------------- |
+| **Account**   | An identity (username + password) owning scoped API keys + future balance | [negotiation.md](negotiation.md) |
+| **API key**   | A credential scoped to `worker` (provide compute) or `user` (send requests) | [negotiation.md](negotiation.md#3-scoped-api-keys) |
+| **Worker**    | A device that logs in with a worker key, declares a model, joins clusters | [negotiation.md](negotiation.md#4-worker-device-registration) |
+| **Liveness**  | `online`/`offline`, heartbeat-driven, orthogonal to registration          | [tunnel.md](tunnel.md#2-health-tracking-server-side) |
+| **Cluster**   | An *ordered* group of workers (a ring) serving one model                  | [assignment.md](assignment.md#3-cluster-config-wireguard) |
+| **Pool server**| The control plane: identities, waitlists, cluster formation, relay orchestration | [negotiation.md](negotiation.md#5-waitlist-and-cluster-formation) |
+| **Relay node**| A dedicated, publicly reachable WG relay for NAT'd members                 | [tunnel.md](tunnel.md#3-direct-first-relay-fallback-tunnel-details) |
 
 ## Scope (v0)
 
@@ -71,9 +54,9 @@ stateDiagram-v2
     registered --> waitlisted: worker device registers with a worker key (model declared)
     waitlisted --> assigned: cluster formed (Σ memory ≥ required)
     assigned --> waitlisted: cluster dissolved (member offline/left)
-    ready --> waitlisted: worker leaves / key revoked
     waitlisted --> registered: all workers revoked
-    ready --> [*]: worker leaves
+    assigned --> [*]: worker leaves (DELETE /workers/{id})
+    waitlisted --> [*]: worker leaves (DELETE /workers/{id})
 
     state "offline (liveness)" as offline
     waitlisted --> offline: heartbeat timeout (~30s)
@@ -86,8 +69,8 @@ its registration; it is simply out of the scheduling picture until it heartbeats
 
 **Cluster dissolution**: a worker in an active cluster that goes offline (or leaves) dissolves the
 whole cluster — all members return to the waitlist, because the model no longer fits in the
-remaining members' memory. Online members stay `online` and can be re-assigned; offline members
-must heartbeat to rejoin (see [assignment.md](assignment.md#cluster-dissolution)).
+remaining members' memory. Details in
+[assignment.md](assignment.md#cluster-dissolution).
 
 Every state is observable via `GET /v1/workers/{id}/state`, so a daemon can always recover.
 
@@ -95,16 +78,13 @@ Every state is observable via `GET /v1/workers/{id}/state`, so a daemon can alwa
 
 - The worker generates its own WireGuard keypair locally and **never uploads the private key**.
   Revocation is therefore: drop the peer from every member's config and evict.
-- A **scoped API key** authenticates control-plane calls (Bearer token). A worker key can only
-  register/operate a worker; it cannot manage the account or send requests.
 - **Key revocation is distinct from going offline.** Revoking a key invalidates the credential
   (permanent). Going offline is transient: the key stays valid, the worker is just removed from the
   waitlist until it returns.
-- `memory_allocated_mb` is **self-declared** in v0. Verifying it against hardware is an open
-  problem.
+- `memory_allocated_mb` is **self-declared** in v0 (see
+  [usage-and-accounting.md](usage-and-accounting.md#5-trust-self-declared-memory)).
 - Relay mode means the relay **can observe cluster traffic** — workers are told when they are on
   relay vs direct (the relay appears in their config as a peer).
-- Usage reports are plain (unsigned) in v0; this is a known limitation.
 
 ## Conventions
 

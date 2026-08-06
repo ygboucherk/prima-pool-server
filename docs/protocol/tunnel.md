@@ -80,9 +80,9 @@ waitlist after being offline.
 
 ## 4. Readiness timeout
 
-After the last `cluster_assigned` push, the server waits up to **60 s** for all members to report
-`ready`. Members that miss the deadline are marked `failed`; the server may retry cluster formation
-(excluding failed members).
+The server waits up to **60 s** for all members to report readiness after the last
+`cluster_assigned` push; members that miss it are marked `failed` and cluster formation may be
+retried (see [assignment.md](assignment.md#5-readiness-handshake)).
 
 ## 5. Leaving
 

@@ -5,14 +5,25 @@
 v0 supports only worker-initiated leave (`DELETE /v1/workers/{worker_id}`) and liveness
 tracking. This document records the intended behavior so the protocol stays compatible.
 
-## Planned events
+## v0 behavior (what exists today)
 
-| Event            | Trigger                                   | Protocol impact                              |
-| ---------------- | ----------------------------------------- | -------------------------------------------- |
-| Worker leaves    | `DELETE /v1/workers/{worker_id}`          | Remove from cluster; remaining members get `cluster_updated` + re-pull config. |
-| Eviction         | Server-initiated (unhealthy, policy)      | `cluster_evicted` WS frame (v1).             |
-| Rebalance        | Cluster under/over capacity               | `cluster_updated` with new peer list.        |
-| Failure          | Member offline mid-request                | Client-side retry; server rebalances (v1).   |
+- **Worker leaves** → `DELETE /v1/workers/{worker_id}`. If the worker was in a cluster, the cluster
+  is dissolved and all members return to the waitlist (see
+  [assignment.md](assignment.md#cluster-dissolution)).
+- **Worker goes offline** → same dissolution. Offline members rejoin on heartbeat; online members
+  are immediately re-eligible.
+- There is **no** `cluster_updated` or per-member eviction in v0.
+
+## Planned events (v1+)
+
+| Event    | Trigger                                  | Protocol impact                            |
+| -------- | ---------------------------------------- | ------------------------------------------ |
+| Eviction | Server-initiated (unhealthy, policy)     | `cluster_evicted` WS frame (v1).           |
+| Rebalance| Cluster under/over capacity              | `cluster_updated` with new peer list (v1). |
+
+The core v1 goal is eviction + rebalance **without** full dissolution — so a cluster survives a
+member loss instead of dissolving. `cluster_updated` (a new WS frame) tells remaining members to
+diff their WG config against a new peer list. This is deliberately deferred from v0.
 
 ## Known v0 gap: mid-request failure
 
@@ -24,8 +35,7 @@ mid-request triggers dissolution:
 - The client-side retry is the only safety net for the failed request.
 - Offline members rejoin on heartbeat; online members are immediately re-eligible.
 
-This is an accepted v0 limitation, deliberately deferred so negotiation v0 stays small. The first
-thing v1 must address is eviction + rebalance *without* full dissolution (see "Planned events").
+This is an accepted v0 limitation, deliberately deferred so negotiation v0 stays small.
 
 ## Design principles
 

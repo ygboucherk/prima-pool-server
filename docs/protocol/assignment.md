@@ -24,8 +24,7 @@ On connect, the server sends a `hello` frame carrying the negotiated cadence and
 | Frame                | Direction       | Payload (key fields)                                    |
 | -------------------- | --------------- | ------------------------------------------------------- |
 | `hello`              | server → client | state, cadence                                           |
-| `cluster_assigned`   | server → client | `cluster_id`, `worker_id`, `model`                       |
-| `cluster_config`     | server → client | full WireGuard/peer config (below)                       |
+| `cluster_assigned`   | server → client | `cluster_id`, `worker_id`, `model`, `assigned_ip`, `subnet`, `ring_position`, `config_url` |
 | `cluster_dissolved`  | server → client | `cluster_id`, `reason` (member offline / member left)    |
 | `cluster_evicted`    | server → client | `reason` (v1; worker-initiated leave uses REST instead)  |
 | `ping` / `pong`      | both            | keepalive                                                |
@@ -160,6 +159,10 @@ only tells workers *which* relay to use.
 
 After bringing up WireGuard and joining the prima.cpp cluster, each member calls:
 
+> **Terminology**: "ready" here is a **cluster-readiness signal** (this member finished bringing
+> up WG and joined prima.cpp). It is not a worker status — worker status is
+> `[registered, waitlisted, assigned]` plus `online`.
+
 ### `POST /v1/clusters/{id}/ready`
 
 The request body is empty; the caller is identified by the worker-scoped API key (there is no
@@ -171,7 +174,7 @@ The request body is empty; the caller is identified by the worker-scoped API key
 { "cluster_id": "clu_01HZ4...", "status": "assembling", "members_ready": 2, "members_total": 3 }
 ```
 
-**Errors** — `409 not_member` if the worker is not in the cluster.
+**Errors** — `403 not_a_member` if the worker is not in the cluster.
 
 The cluster becomes **live** (routable) when the server has received `ready` from every member, or
 after a readiness timeout (default 60 s — members that miss it are marked failed and the cluster
@@ -186,7 +189,7 @@ reconstruct everything after a restart:
 {
   "worker_id": "wrk_01HZ3...",
   "account_id": "acc_01HZ2...",
-  "status": "assigned",                          // "registered" | "waitlisted" | "assigned" | "ready"
+  "status": "assigned",                          // "registered" | "waitlisted" | "assigned"
   "online": true,                                // false → removed from waitlist until next heartbeat
   "model": "llama-3.1-8b-instruct",
   "cluster": { "cluster_id": "clu_01HZ4...", "assigned_ip": "10.23.7.2", "config_url": "..." }
