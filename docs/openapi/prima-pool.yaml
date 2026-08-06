@@ -1,0 +1,578 @@
+openapi: 3.1.0
+info:
+  title: prima-pool control plane API
+  version: 0.3.0
+  description: >
+    Negotiation protocol for the prima-pool inference pool. Accounts register with a username and
+    password, create scoped API keys (worker / user), and worker devices log in with a worker key
+    to join WireGuard clusters. Usage/accounting endpoints are intentionally out of scope
+    (see docs/protocol/usage-and-accounting.md).
+servers:
+  - url: https://pool.example.com/v1
+tags:
+  - name: accounts
+    description: Account registration, login, and scoped API key management.
+  - name: workers
+    description: Worker device registration, state, heartbeat.
+  - name: clusters
+    description: Cluster config and readiness.
+
+paths:
+  /accounts/register:
+    post:
+      tags: [accounts]
+      operationId: registerAccount
+      summary: Register an account (username + password).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterAccountRequest"
+      responses:
+        "201":
+          description: Account registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /accounts/login:
+    post:
+      tags: [accounts]
+      operationId: login
+      summary: Log in and receive a short-lived session token for key management.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Session token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /accounts/{account_id}/keys:
+    post:
+      tags: [accounts]
+      operationId: createKey
+      summary: Create a scoped API key (worker or user).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyRequest"
+      responses:
+        "201":
+          description: Key created (secret shown once).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKey"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      tags: [accounts]
+      operationId: listKeys
+      summary: List the account's API keys (without secrets).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: List of keys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApiKeySummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /accounts/{account_id}/keys/{key_id}:
+    delete:
+      tags: [accounts]
+      operationId: revokeKey
+      summary: Revoke a scoped API key.
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/KeyId"
+      responses:
+        "204":
+          description: Key revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/register:
+    post:
+      tags: [workers]
+      operationId: registerWorker
+      summary: Register a worker device with a worker-scoped key (joins the model's waitlist).
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterWorkerRequest"
+      responses:
+        "201":
+          description: Worker registered, waitlisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Worker"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /workers/{worker_id}:
+    delete:
+      tags: [workers]
+      operationId: revokeWorker
+      summary: Revoke a worker (leave the waitlist / cluster).
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "204":
+          description: Worker revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /workers/{worker_id}/state:
+    get:
+      tags: [workers]
+      operationId: getWorkerState
+      summary: Recover the worker's full current state (WS recovery path).
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "200":
+          description: Worker state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/{worker_id}/heartbeat:
+    post:
+      tags: [workers]
+      operationId: heartbeat
+      summary: Report liveness.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "200":
+          description: Heartbeat acknowledged.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /clusters/{cluster_id}/config:
+    get:
+      tags: [clusters]
+      operationId: getClusterConfig
+      summary: Fetch the WireGuard cluster config (idempotent, re-pullable).
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ClusterId"
+      responses:
+        "200":
+          description: Cluster config.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /clusters/{cluster_id}/ready:
+    post:
+      tags: [clusters]
+      operationId: reportReady
+      summary: Report that this worker has brought up WireGuard and joined prima.cpp.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ClusterId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportReadyRequest"
+      responses:
+        "202":
+          description: Readiness accepted (cluster may still be assembling).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      description: Scoped API key (worker or user), e.g. `sk-worker-abc123`.
+    sessionAuth:
+      type: http
+      scheme: bearer
+      description: Short-lived session token from /accounts/login, e.g. `sess_...`.
+  parameters:
+    AccountId:
+      name: account_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^acc_[A-Za-z0-9]+$"
+      description: Account ID returned at registration.
+    WorkerId:
+      name: worker_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^wrk_[A-Za-z0-9]+$"
+    KeyId:
+      name: key_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^key_[A-Za-z0-9]+$"
+    ClusterId:
+      name: cluster_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^clu_[A-Za-z0-9]+$"
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: Invalid or missing credentials.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: Authenticated but not allowed (e.g. not a cluster member).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: Resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    TooManyRequests:
+      description: Rate-limited.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: State conflict (e.g. username taken).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+
+    RegisterAccountRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+
+    Account:
+      type: object
+      required: [account_id, username, created_at]
+      properties:
+        account_id: { type: string }
+        username: { type: string }
+        created_at:
+          type: string
+          format: date-time
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+
+    Session:
+      type: object
+      required: [session_token, expires_at]
+      properties:
+        session_token: { type: string }
+        expires_at:
+          type: string
+          format: date-time
+
+    CreateKeyRequest:
+      type: object
+      required: [name, scope]
+      properties:
+        name: { type: string }
+        scope:
+          type: string
+          enum: [worker, user]
+
+    ApiKey:
+      type: object
+      required: [key_id, name, scope, api_key, created_at]
+      properties:
+        key_id: { type: string }
+        name: { type: string }
+        scope:
+          type: string
+          enum: [worker, user]
+        api_key:
+          type: string
+          description: Shown only once, at creation.
+        created_at:
+          type: string
+          format: date-time
+
+    ApiKeySummary:
+      type: object
+      required: [key_id, name, scope, created_at]
+      properties:
+        key_id: { type: string }
+        name: { type: string }
+        scope:
+          type: string
+          enum: [worker, user]
+        created_at:
+          type: string
+          format: date-time
+
+    Hardware:
+      type: object
+      properties:
+        cpu: { type: string }
+        gpu: { type: string }
+        ram_gb: { type: number }
+        os: { type: string }
+        prima_version: { type: string }
+
+    EndpointInfo:
+      type: object
+      required: [host, port, behind_nat, nat_type]
+      properties:
+        host: { type: string, format: hostname }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        behind_nat: { type: boolean }
+        nat_type:
+          type: string
+          enum: [none, cone, symmetric, unknown]
+
+    RegisterWorkerRequest:
+      type: object
+      required: [model, memory_allocated_mb, wg_pubkey, endpoint]
+      properties:
+        model: { type: string }
+        memory_allocated_mb: { type: integer, minimum: 1 }
+        wg_pubkey:
+          type: string
+          description: Device's WireGuard public key (private key never leaves the device).
+        endpoint:
+          $ref: "#/components/schemas/EndpointInfo"
+        hardware:
+          $ref: "#/components/schemas/Hardware"
+
+    Worker:
+      type: object
+      required: [worker_id, account_id, status, model]
+      properties:
+        worker_id: { type: string }
+        account_id: { type: string }
+        status:
+          type: string
+          enum: [waitlisted, assigned, active, revoked]
+        model: { type: string }
+        waitlist_position:
+          type: integer
+          description: >
+            Point-in-time snapshot of the worker's position in the waitlist. Not stable state:
+            positions shift as workers join/leave/offline. Clients should not rely on it.
+        online:
+          type: boolean
+          description: >
+            Liveness flag, orthogonal to status. false = removed from the waitlist until the
+            next heartbeat; the key and worker_id remain valid.
+
+    WorkerState:
+      type: object
+      required: [worker_id, account_id, status, model]
+      properties:
+        worker_id: { type: string }
+        account_id: { type: string }
+        status:
+          type: string
+          enum: [registered, waitlisted, assigned, ready]
+        online:
+          type: boolean
+          description: Liveness flag; false means the worker is down (out of the waitlist).
+        model: { type: string }
+        cluster:
+          $ref: "#/components/schemas/ClusterAssignment"
+
+    ClusterAssignment:
+      type: object
+      properties:
+        cluster_id: { type: string }
+        assigned_ip: { type: string }
+        config_url: { type: string, format: uri }
+
+    ClusterConfig:
+      type: object
+      required: [cluster_id, interface, peers]
+      properties:
+        cluster_id: { type: string }
+        interface:
+          type: object
+          required: [private_ip, subnet]
+          properties:
+            private_ip: { type: string }
+            subnet: { type: string }
+            mtu:
+              type: integer
+              default: 1280
+              description: >
+                WireGuard MTU. Defaults to 1280 (safe IPv6 minimum) to avoid fragmentation over
+                NAT/relay links; the server may set a different value per cluster.
+        relay:
+          type: object
+          properties:
+            pubkey: { type: string }
+            endpoint: { type: string }
+            enabled: { type: boolean, default: false }
+        peers:
+          type: array
+          items:
+            $ref: "#/components/schemas/PeerConfig"
+
+    PeerConfig:
+      type: object
+      required: [pubkey, allowed_ips]
+      properties:
+        pubkey: { type: string }
+        endpoint: { type: string }
+        allowed_ips:
+          type: array
+          items: { type: string }
+        persistent_keepalive: { type: integer, default: 25 }
+        preferred:
+          type: string
+          enum: [direct, relay]
+          default: direct
+
+    ReportReadyRequest:
+      type: object
+      description: >
+        Empty body. The caller is identified by the worker-scoped API key; no worker_id is needed.
+      properties: {}
+
+    ClusterStatus:
+      type: object
+      required: [cluster_id, status]
+      properties:
+        cluster_id: { type: string }
+        status:
+          type: string
+          enum: [assembling, live]
+        members_ready: { type: integer }
+        members_total: { type: integer }
