@@ -481,7 +481,11 @@ components:
         account_id: { type: string }
         status:
           type: string
-          enum: [waitlisted, assigned, active, revoked]
+          enum: [registered, waitlisted, assigned]
+          description: >
+            Registration/provisioning state. registered = exists; waitlisted = available on a
+            model's waitlist; assigned = in an active cluster. Liveness is tracked separately via
+            `online`.
         model: { type: string }
         waitlist_position:
           type: integer
@@ -502,7 +506,10 @@ components:
         account_id: { type: string }
         status:
           type: string
-          enum: [registered, waitlisted, assigned, ready]
+          enum: [registered, waitlisted, assigned]
+          description: >
+            Same enum as Worker.status; `ready`/`active` are not worker states. Liveness is
+            `online`; cluster readiness is the cluster's own status.
         online:
           type: boolean
           description: Liveness flag; false means the worker is down (out of the waitlist).
@@ -542,6 +549,10 @@ components:
             enabled: { type: boolean, default: false }
         peers:
           type: array
+          description: >
+            Ordered list of cluster members — this is the prima.cpp ring. Array order is
+            significant: index 0 is the ring head, and each member's ring position is its index.
+            All members MUST agree on this order; the server is authoritative.
           items:
             $ref: "#/components/schemas/PeerConfig"
 

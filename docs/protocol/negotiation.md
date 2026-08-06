@@ -206,14 +206,15 @@ When the server forms a cluster, it:
 3. Builds each member's **peer list** (see [assignment.md](assignment.md)).
 4. Pushes `cluster_assigned` to every member over its WebSocket.
 
-**Cluster lifecycle**: a cluster is **persistent until failure** — it stays up as long as all its
-members are `online`. It does not dissolve on idle. Workers are removed from the waitlist while
-assigned; they return to it only when they leave the cluster (worker-initiated leave, or eviction /
-rebalance in v1, see [churn.md](churn.md)). This is the chosen v0 policy; idle-timeout dissolution
-was considered and rejected.
+**Cluster lifecycle**: a cluster exists only while it has **all its members online**. Because
+prima.cpp shards a model across nodes (each node holds a copy of the weights), a cluster with a
+missing member can't serve — the model no longer fits in the remaining memory. So when a member
+goes offline or leaves, the server **dissolves the cluster** and returns **all** members to the
+waitlist (see [assignment.md](assignment.md#cluster-dissolution)). A cluster does **not** dissolve
+on idle; it only dissolves on membership loss. There is no "persistent" half-dead cluster.
 
-The waitlist condition is the only trigger for cluster formation in v0. Membership changes
-(rebalance, eviction) are v1+.
+The waitlist condition is the only trigger for cluster formation in v0. Rebalance without full
+dissolution is v1+ (see [churn.md](churn.md)).
 
 ## 6. Cadence and timeouts (suggested defaults)
 

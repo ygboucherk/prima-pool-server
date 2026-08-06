@@ -26,6 +26,7 @@ On connect, the server sends a `hello` frame carrying the negotiated cadence and
 | `hello`              | server → client | state, cadence                                           |
 | `cluster_assigned`   | server → client | `cluster_id`, `worker_id`, `model`                       |
 | `cluster_config`     | server → client | full WireGuard/peer config (below)                       |
+| `cluster_dissolved`  | server → client | `cluster_id`, `reason` (member offline / member left)    |
 | `cluster_evicted`    | server → client | `reason` (v1; worker-initiated leave uses REST instead)  |
 | `ping` / `pong`      | both            | keepalive                                                |
 
@@ -41,6 +42,20 @@ All worker-scoped endpoints (`GET /state`, `POST /heartbeat`, `DELETE /workers/{
 WS channel, and `POST /clusters/{id}/ready`) require the **worker key that owns the target
 `worker_id`**. A worker key cannot access another worker's state, heartbeat, or cluster config.
 
+### Cluster dissolution
+
+Because prima.cpp shards a model across nodes and **every node must hold a copy of the model
+weights**, a cluster with a missing member is *broken* — the model no longer fits in the remaining
+members' memory, and they can't serve it. So when a member of an active cluster goes offline (or
+leaves), the server **dissolves the cluster** and returns **all** members to the waitlist:
+
+- Online members: `status: waitlisted`, `online: true` — immediately eligible for re-assignment.
+- Offline members: `status: waitlisted`, `online: false` — must heartbeat to rejoin.
+
+The server pushes `cluster_dissolved` to every member (with `reason: member_offline` or
+`member_left`). Members tear down their WG interface and wait for the next assignment. The
+dissolution is also reflected in `GET /state`.
+
 ## 2. Cluster assignment
 
 On cluster formation, the server sends each member:
@@ -53,12 +68,18 @@ On cluster formation, the server sends each member:
   "model": "llama-3.1-8b-instruct",
   "assigned_ip": "10.23.7.2",
   "subnet": "10.23.7.0/24",
+  "ring_position": 1,
   "config_url": "https://pool.example.com/v1/clusters/clu_01HZ4.../config"
 }
 ```
 
 `config_url` lets the worker **re-pull** the full config (idempotent), and is the recovery path
 for missed `cluster_config` pushes.
+
+**Ring order**: the cluster is a prima.cpp **ring** — `peers` in the cluster config is an *ordered*
+list (index 0 = ring head). `ring_position` in this frame tells the member its own index, so it
+immediately knows its role. The server is authoritative for ring order; every member must build the
+same ring from `GET /config`.
 
 ## 3. Cluster config (WireGuard)
 
@@ -78,12 +99,26 @@ for missed `cluster_config` pushes.
     "enabled": true
   },
   "peers": [
-    {
+    {   // ring position 0 (ring head)
       "pubkey": "peer_a_pubkey",
-      "endpoint": "203.0.113.20:51820",        // best-known endpoint (STUN self-report)
+      "endpoint": "203.0.113.20:51820",
       "allowed_ips": ["10.23.7.1/32"],
-      "persistent_keepalive": 25,               // keep NAT mapping alive
-      "preferred": "direct"                     // "direct" | "relay"
+      "persistent_keepalive": 25,
+      "preferred": "direct"
+    },
+    {   // ring position 1 (this member, if it is the one fetching)
+      "pubkey": "peer_b_pubkey",
+      "endpoint": "203.0.113.21:51820",
+      "allowed_ips": ["10.23.7.2/32"],
+      "persistent_keepalive": 25,
+      "preferred": "direct"
+    },
+    {   // ring position 2
+      "pubkey": "peer_c_pubkey",
+      "endpoint": "203.0.113.22:51820",
+      "allowed_ips": ["10.23.7.3/32"],
+      "persistent_keepalive": 25,
+      "preferred": "relay"
     }
   ]
 }
@@ -91,6 +126,8 @@ for missed `cluster_config` pushes.
 
 Notes:
 
+- **Array order = ring order.** `peers[0]` is the ring head, `peers[1]` is next, etc. Every member
+  receives the same ordered list and MUST build the same ring from it; the server is authoritative.
 - The worker **already has** its own WG keypair; it only needs `interface` + `peers` to bring up
   the tunnel.
 - `relay.enabled` tells the worker that a relay path exists and should be used as fallback.

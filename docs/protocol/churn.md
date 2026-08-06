@@ -16,15 +16,16 @@ tracking. This document records the intended behavior so the protocol stays comp
 
 ## Known v0 gap: mid-request failure
 
-A cluster is **persistent until failure** (see [negotiation.md](negotiation.md#5-waitlist-and-cluster-formation)),
-so an active member that goes offline mid-request has **no defined recovery in v0**:
+A cluster is **dissolved when any member goes offline** (see
+[negotiation.md](negotiation.md#5-waitlist-and-cluster-formation)), so an active member that drops
+mid-request triggers dissolution:
 
-- The cluster is not auto-evicted or rebalanced (that's v1).
-- A request in flight when a member drops may fail; the client-side retry is the only safety net.
-- The offline member is excluded from *new* assignments, but the cluster is not torn down.
+- The whole cluster is returned to the waitlist; a request in flight may fail.
+- The client-side retry is the only safety net for the failed request.
+- Offline members rejoin on heartbeat; online members are immediately re-eligible.
 
-This is an accepted v0 limitation, deliberately deferred so negotiation v0 stays small. It is the
-first thing v1 must address (eviction + rebalance + mid-request failover).
+This is an accepted v0 limitation, deliberately deferred so negotiation v0 stays small. The first
+thing v1 must address is eviction + rebalance *without* full dissolution (see "Planned events").
 
 ## Design principles
 

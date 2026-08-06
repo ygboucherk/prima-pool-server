@@ -40,6 +40,11 @@ authenticated, negotiated peers.
   re-registration.
 - **Pool server** — the control plane. Issues identities, maintains per-model waitlists, forms
   clusters, and (in relay fallback) orchestrates connectivity.
+- **Cluster (ring)** — an ordered group of workers serving one model, formed when the waitlist's
+  combined `memory_allocated_mb` meets the model's requirement. prima.cpp treats members as a
+  **ring**: `peers[]` in the cluster config is an ordered list (index 0 = ring head) and the server
+  is authoritative for that order. All members must agree on the same ring for the model to
+  assemble.
 - **Relay node** — a dedicated, publicly reachable WireGuard relay. Not part of the control plane;
   it only forwards cluster traffic when a direct path between members is unavailable. Relays are
   separate machines, operated independently of the pool server.
@@ -65,7 +70,7 @@ stateDiagram-v2
     [*] --> registered: account registered
     registered --> waitlisted: worker device registers with a worker key (model declared)
     waitlisted --> assigned: cluster formed (Σ memory ≥ required)
-    assigned --> ready: all members report ready
+    assigned --> waitlisted: cluster dissolved (member offline/left)
     ready --> waitlisted: worker leaves / key revoked
     waitlisted --> registered: all workers revoked
     ready --> [*]: worker leaves
@@ -74,11 +79,15 @@ stateDiagram-v2
     waitlisted --> offline: heartbeat timeout (~30s)
     offline --> waitlisted: heartbeat resumes (same worker_id)
     assigned --> offline: heartbeat timeout
-    ready --> offline: heartbeat timeout
 ```
 
 **Liveness is orthogonal to registration.** An offline worker keeps its `worker_id`, its key, and
 its registration; it is simply out of the scheduling picture until it heartbeats again.
+
+**Cluster dissolution**: a worker in an active cluster that goes offline (or leaves) dissolves the
+whole cluster — all members return to the waitlist, because the model no longer fits in the
+remaining members' memory. Online members stay `online` and can be re-assigned; offline members
+must heartbeat to rejoin (see [assignment.md](assignment.md#cluster-dissolution)).
 
 Every state is observable via `GET /v1/workers/{id}/state`, so a daemon can always recover.
 
@@ -102,6 +111,6 @@ Every state is observable via `GET /v1/workers/{id}/state`, so a daemon can alwa
 - API is versioned: `/v1/...`. Breaking changes bump the major version.
 - All timestamps are RFC 3339 UTC.
 - Errors use RFC 7807 `application/problem+json` (see [negotiation.md](negotiation.md#8-errors)).
-- Suggested default cadences live in [negotiation.md](negotiation.md#cadence-and-timeouts).
+- Suggested default cadences live in [negotiation.md](negotiation.md#6-cadence-and-timeouts-suggested-defaults).
 - **Transport**: all control-plane traffic is HTTPS/WSS — credentials, API keys, and session
   tokens must never transit plaintext. There is no HTTP fallback.

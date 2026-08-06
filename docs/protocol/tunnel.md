@@ -35,8 +35,9 @@ orthogonal to registration**:
 - It is **removed from the waitlist** — it can't be assigned work while offline.
 - On the next heartbeat, it is **re-added to the waitlist** with the same identity. No
   re-registration.
-- If the worker was serving in an active cluster, it is excluded from new assignments (v0).
-  Eviction / rebalancing of active members is v1 (see [churn.md](churn.md)).
+- **If the worker was serving in an active cluster, the cluster is dissolved**: the model no
+  longer fits in the remaining members' memory, so the server returns **all** members to the
+  waitlist (online members stay eligible; see [assignment.md](assignment.md#cluster-dissolution)).
 
 **Grace period**: a heartbeat re-adds a worker to the waitlist, but the worker is not immediately
 assignable. The server waits a short **assignable grace period** (default 5 s) after the first
