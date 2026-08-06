@@ -1,6 +1,6 @@
 # prima-pool-server
 
-A server for an AI inference pool based on prima.cpp.
+A server for an AI inference pool based on prima.cpp. Note: this repo is currently an unimplemented idea.
 
 # Abstract
 Large Language Models are often too large to run on a single machine, leading people to attempt to spread models across multiple machines. One of these attempts led to the creation of prima.cpp, which spreads a model across multiple machines connected to a local network.
