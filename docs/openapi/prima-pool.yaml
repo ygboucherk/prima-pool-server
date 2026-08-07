@@ -16,6 +16,8 @@ tags:
     description: Worker device registration, state, heartbeat.
   - name: clusters
     description: Cluster config and readiness.
+  - name: inference
+    description: OpenAI-compatible inference proxy to live clusters.
 
 paths:
   /accounts/register:
@@ -273,6 +275,54 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /chat/completions:
+    post:
+      tags: [inference]
+      operationId: chatCompletions
+      summary: Proxy an OpenAI-compatible chat completion to a live cluster's head.
+      description: >
+        Auth: user-scoped API key. The server finds a live cluster for the requested
+        model and forwards the request to the head's llama-server over the WireGuard
+        tunnel (option A: the server joins the cluster WG network). Streaming (SSE)
+        is supported when `stream: true`.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model: { type: string }
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string }
+                      content: { type: string }
+                stream: { type: boolean, default: false }
+                max_tokens: { type: integer }
+      responses:
+        "200":
+          description: Chat completion (or SSE stream).
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: Upstream cluster head unreachable.
 
 components:
   securitySchemes:
@@ -570,6 +620,12 @@ components:
           type: string
           enum: [direct, relay]
           default: direct
+        role:
+          type: string
+          enum: [server]
+          description: >
+            Optional role marker. `server` = the control plane (NOT a ring member);
+            clients MUST exclude server peers from ring topology computation.
 
     ReportReadyRequest:
       type: object

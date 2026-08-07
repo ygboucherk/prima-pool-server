@@ -1,6 +1,6 @@
 # prima-pool protocol — overview
 
-**Status:** v0 draft — negotiation only. Not yet implemented.
+**Status:** v0 — negotiation + inference proxy implemented (see `prima-pool-server`).
 
 This document defines how a **worker device** talks to the **prima-pool control plane**
 (pool server), and how that negotiation results in a **WireGuard tunnel** between cluster
@@ -43,8 +43,15 @@ authenticated, negotiated peers.
 | Cluster assignment (WS push) + config retrieval           | Payment / billing                                   |
 | WireGuard tunnel bring-up (direct-first, relay fallback)  | Model registry management (admin)                    |
 | Readiness handshake, heartbeat, liveness                  | Multiple workers (models) per device                 |
-| Offline workers: removed from waitlist, re-added on return | The user-facing request API (only the key scope)    |
+| Offline workers: removed from waitlist, re-added on return |                                                     |
 | Worker-initiated leave                                    |                                                     |
+| **Inference proxy** (`POST /v1/chat/completions` → head)  |                                                     |
+
+> **Inference proxy (option A):** the server may join each cluster's WireGuard
+> network (as a peer marked `role: "server"`) and proxy OpenAI-compatible
+> requests to the head's `llama-server`. This is gated by
+> `PRIMA_POOL_SERVER_JOIN_WG`. The server peer is **not** a ring member — clients
+> must exclude it from ring topology computation.
 
 ## Worker lifecycle
 
