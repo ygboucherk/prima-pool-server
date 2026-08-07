@@ -44,10 +44,14 @@ class WsHub:
     async def broadcast_cluster_assigned(self, cluster_id: str, worker_id: str, payload: dict[str, Any]) -> None:
         await self.send(worker_id, {"type": "cluster_assigned", **payload})
 
-    async def broadcast_cluster_dissolved(self, cluster_id: str, reason: str) -> None:
+    async def broadcast_cluster_dissolved(self, cluster_id: str, reason: str, member_ids: list[str] | None = None) -> None:
         frame = {"type": "cluster_dissolved", "cluster_id": cluster_id, "reason": reason}
-        # Notify all members of the cluster (we don't track membership here, so
-        # the scheduler passes the cluster_id; members are looked up via store).
+        # Notify the given members (or, if not provided, any connected worker
+        # whose cluster_id matches — used when the cluster is still intact).
+        if member_ids is not None:
+            for wid in member_ids:
+                await self.send(wid, frame)
+            return
         for wid in list(self._connections.keys()):
             w = self.store.get_worker(wid)
             if w and w.cluster_id == cluster_id:

@@ -71,22 +71,31 @@ def new_api_key(scope: str) -> str:
     return f"sk-{scope}-{secrets.token_urlsafe(24)}"
 
 
-def new_session_token() -> str:
-    return f"sess_{secrets.token_urlsafe(24)}"
+def hash_api_key(secret: str) -> str:
+    """Deterministic hash of an API key.
+
+    API keys are high-entropy random secrets, so a salted KDF is unnecessary;
+    a plain SHA-256 (with a scheme prefix) lets us look up by hash without a
+    random salt breaking the lookup.
+    """
+    return "sha256$" + hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
 def sign_session(token: str, secret: str, expires_at: int) -> str:
-    """Return a signed session token: <token>.<expiry>.<hmac>."""
+    """Return a signed session token: sess_<token>.<expiry>.<hmac>."""
     payload = f"{token}.{expires_at}"
     sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return f"{payload}.{sig}"
+    return f"sess_{payload}.{sig}"
 
 
 def verify_session(signed: str, secret: str, now: int | None = None) -> tuple[str, int] | None:
     """Verify a signed session token. Returns (token, expires_at) or None."""
     now = now if now is not None else int(time.time())
+    if not signed.startswith("sess_"):
+        return None
+    body = signed[len("sess_"):]
     try:
-        token, exp_str, sig = signed.rsplit(".", 2)
+        token, exp_str, sig = body.rsplit(".", 2)
         expires_at = int(exp_str)
     except ValueError:
         return None

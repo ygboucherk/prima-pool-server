@@ -16,9 +16,27 @@ from .models import (
     AccountRecord,
     ApiKeyRecord,
     ClusterRecord,
+    EndpointInfo,
+    Hardware,
     WorkerRecord,
     WorkerStatus,
 )
+
+
+def _worker_to_dict(w: WorkerRecord) -> dict:
+    d = vars(w).copy()
+    d["endpoint"] = w.endpoint.model_dump() if w.endpoint else None
+    d["hardware"] = w.hardware.model_dump() if w.hardware else None
+    return d
+
+
+def _worker_from_dict(d: dict) -> WorkerRecord:
+    d = dict(d)
+    if d.get("endpoint") is not None:
+        d["endpoint"] = EndpointInfo(**d["endpoint"])
+    if d.get("hardware") is not None:
+        d["hardware"] = Hardware(**d["hardware"])
+    return WorkerRecord(**d)
 
 
 class Store:
@@ -51,7 +69,7 @@ class Store:
             self.api_keys[rec.key_id] = rec
             self.api_keys_by_hash[rec.key_hash] = rec.key_id
         for w in data.get("workers", []):
-            rec = WorkerRecord(**w)
+            rec = _worker_from_dict(w)
             self.workers[rec.worker_id] = rec
         for c in data.get("clusters", []):
             rec = ClusterRecord(**c)
@@ -64,7 +82,7 @@ class Store:
         data = {
             "accounts": [vars(a) for a in self.accounts.values()],
             "api_keys": [vars(k) for k in self.api_keys.values()],
-            "workers": [vars(w) for w in self.workers.values()],
+            "workers": [_worker_to_dict(w) for w in self.workers.values()],
             "clusters": [
                 {**vars(c), "ready": sorted(c.ready)} for c in self.clusters.values()
             ],
@@ -111,7 +129,7 @@ class Store:
                 account_id=account_id,
                 name=name,
                 scope=scope,
-                key_hash=security.hash_password(secret),
+                key_hash=security.hash_api_key(secret),
                 created_at=time.time(),
             )
             self.api_keys[rec.key_id] = rec
@@ -139,7 +157,7 @@ class Store:
     def resolve_api_key(self, secret: str) -> ApiKeyRecord | None:
         """Look up an API key by its plaintext secret (hash lookup)."""
         with self._lock:
-            key_hash = security.hash_password(secret)
+            key_hash = security.hash_api_key(secret)
             key_id = self.api_keys_by_hash.get(key_hash)
             return self.api_keys.get(key_id) if key_id else None
 
@@ -148,6 +166,23 @@ class Store:
         with self._lock:
             self.workers[rec.worker_id] = rec
             self._mutate()
+
+    def create_worker_if_available(self, rec: WorkerRecord, max_per_account: int) -> bool:
+        """Atomically create a worker, enforcing the per-account worker cap and
+        the one-device-one-worker rule (one active worker per model per account).
+
+        Returns True if created, False if a limit was hit.
+        """
+        with self._lock:
+            existing = [w for w in self.workers.values() if w.account_id == rec.account_id]
+            if len(existing) >= max_per_account:
+                return False
+            for w in existing:
+                if w.model == rec.model and w.status != WorkerStatus.registered:
+                    return False
+            self.workers[rec.worker_id] = rec
+            self._mutate()
+            return True
 
     def get_worker(self, worker_id: str) -> WorkerRecord | None:
         with self._lock:

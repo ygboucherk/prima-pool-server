@@ -12,7 +12,6 @@ from prima_pool_server.store import Store
 @pytest.fixture()
 def settings() -> Settings:
     return Settings(
-        dev_insecure=True,
         models={"demo-model": 4096},
         assignable_grace_s=0,
         heartbeat_timeout_s=30,
@@ -67,6 +66,15 @@ def _register_worker(client: TestClient, api_key: str, model="demo-model", memor
     return r
 
 
+def _new_worker_account(client: TestClient, username: str, wg_pubkey: str, memory_mb: int = 4096):
+    """Create an account + worker key + registered worker. Returns (key, worker)."""
+    acc = _register_account(client, username=username)
+    sess = _login(client, username=username)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    worker = _register_worker(client, key, wg_pubkey=wg_pubkey, memory_mb=memory_mb).json()
+    return key, worker
+
+
 def test_register_and_login(client: TestClient):
     acc = _register_account(client)
     assert acc["account_id"].startswith("acc_")
@@ -90,7 +98,7 @@ def test_create_and_list_keys(client: TestClient):
     acc = _register_account(client)
     sess = _login(client)
     key = _create_worker_key(client, acc["account_id"], sess["session_token"])
-    assert key["api_key"].startswith("sk-worker-")
+    assert key.startswith("sk-worker-")
     keys = client.get(
         f"/v1/accounts/{acc['account_id']}/keys",
         headers={"Authorization": f"Bearer {sess['session_token']}"},
@@ -126,24 +134,21 @@ def test_worker_heartbeat_marks_online(client: TestClient):
 
 
 def test_cluster_formation_and_config(client: TestClient):
-    acc = _register_account(client)
-    sess = _login(client)
-    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
-    # Register two workers that together meet the 4096 MB requirement.
-    w1 = _register_worker(client, key, wg_pubkey="pubkey1").json()
-    w2 = _register_worker(client, key, wg_pubkey="pubkey2").json()
+    # Two separate devices (accounts) that together meet the 4096 MB requirement.
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
 
     # Heartbeat both to make them online + assignable.
-    for w in (w1, w2):
+    for key, w in ((key1, w1), (key2, w2)):
         client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
 
     # After the second heartbeat, the scheduler should have formed a cluster.
-    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key}"}).json()
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "assigned", st1
     assert st1["cluster"] is not None
     cluster_id = st1["cluster"]["cluster_id"]
 
-    cfg = client.get(f"/v1/clusters/{cluster_id}/config", headers={"Authorization": f"Bearer {key}"})
+    cfg = client.get(f"/v1/clusters/{cluster_id}/config", headers={"Authorization": f"Bearer {key1}"})
     assert cfg.status_code == 200, cfg.text
     body = cfg.json()
     assert len(body["peers"]) == 2
@@ -152,38 +157,32 @@ def test_cluster_formation_and_config(client: TestClient):
 
 
 def test_cluster_ready_and_live(client: TestClient):
-    acc = _register_account(client)
-    sess = _login(client)
-    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
-    w1 = _register_worker(client, key, wg_pubkey="pubkey1").json()
-    w2 = _register_worker(client, key, wg_pubkey="pubkey2").json()
-    for w in (w1, w2):
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+    for key, w in ((key1, w1), (key2, w2)):
         client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
-    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key}"}).json()
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     cluster_id = st1["cluster"]["cluster_id"]
 
-    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key}"}, json={})
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
     assert r1.status_code == 202
     assert r1.json()["status"] == "assembling"
-    r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key}"}, json={})
+    r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     assert r2.json()["status"] == "live"
 
 
 def test_worker_leave_dissolves_cluster(client: TestClient):
-    acc = _register_account(client)
-    sess = _login(client)
-    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
-    w1 = _register_worker(client, key, wg_pubkey="pubkey1").json()
-    w2 = _register_worker(client, key, wg_pubkey="pubkey2").json()
-    for w in (w1, w2):
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+    for key, w in ((key1, w1), (key2, w2)):
         client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
-    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key}"}).json()
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "assigned"
 
     # w2 leaves -> cluster dissolves, w1 returns to waitlist.
-    r = client.delete(f"/v1/workers/{w2['worker_id']}", headers={"Authorization": f"Bearer {key}"})
+    r = client.delete(f"/v1/workers/{w2['worker_id']}", headers={"Authorization": f"Bearer {key2}"})
     assert r.status_code == 204
-    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key}"}).json()
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "waitlisted"
     assert st1["cluster"] is None
 

@@ -45,9 +45,20 @@ class Scheduler:
         return workers
 
     def _next_subnet(self) -> str:
-        """Allocate a /24 subnet under the configured prefix."""
+        """Allocate a /24 subnet under the configured prefix.
+
+        Avoids reusing a subnet that is still referenced by any worker's
+        assigned IP (a dissolved cluster's members may still have their WG
+        interface up with the old IP until they process cluster_dissolved).
+        """
         used = {c.subnet for c in self.store.list_clusters()}
         base = self.settings.cluster_subnet_prefix
+        # Collect subnets still referenced by any worker's assigned IP.
+        for w in self.store.list_workers():
+            if w.assigned_ip:
+                parts = w.assigned_ip.split(".")
+                if len(parts) == 4:
+                    used.add(f"{parts[0]}.{parts[1]}.{parts[2]}.0/24")
         for third in range(1, 256):
             subnet = f"{base}.{third}.0/24"
             if subnet not in used:
@@ -98,6 +109,17 @@ class Scheduler:
             "peers": peers,
         }
 
+    def _schedule(self, coro) -> None:
+        """Schedule an async coroutine on the running event loop, if any."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            loop.create_task(coro)
+        else:
+            logger.warning("no running event loop; dropping async notification")
+
     def _form_cluster(self, model: str) -> ClusterRecord | None:
         """Form a cluster from the waitlist if enough memory is available."""
         required = self.settings.models.get(model)
@@ -135,13 +157,30 @@ class Scheduler:
             w.assigned_ip = ips[i]
             w.ring_position = i
             self.store.update_worker(w)
+            # Push cluster_assigned to each member over its WebSocket.
+            self._schedule(
+                self.hub.broadcast_cluster_assigned(
+                    cluster_id,
+                    w.worker_id,
+                    {
+                        "cluster_id": cluster_id,
+                        "worker_id": w.worker_id,
+                        "model": model,
+                        "assigned_ip": ips[i],
+                        "subnet": subnet,
+                        "ring_position": i,
+                        "config_url": f"{self.settings.public_base_url}/v1/clusters/{cluster_id}/config",
+                    },
+                )
+            )
 
         logger.info("formed cluster %s for model %s (%d members)", cluster_id, model, len(chosen))
         return cluster
 
     def _dissolve_cluster(self, cluster: ClusterRecord, reason: str) -> None:
         """Return all members to the waitlist and notify them."""
-        for wid in cluster.members:
+        member_ids = list(cluster.members)
+        for wid in member_ids:
             w = self.store.get_worker(wid)
             if w is None:
                 continue
@@ -152,9 +191,10 @@ class Scheduler:
             self.store.update_worker(w)
         self.store.delete_cluster(cluster.cluster_id)
         logger.info("dissolved cluster %s (%s)", cluster.cluster_id, reason)
-        # Notify members asynchronously
-        asyncio.get_event_loop().create_task(
-            self.hub.broadcast_cluster_dissolved(cluster.cluster_id, reason)
+        # Notify members asynchronously (pass member ids explicitly, since their
+        # cluster_id has already been cleared).
+        self._schedule(
+            self.hub.broadcast_cluster_dissolved(cluster.cluster_id, reason, member_ids)
         )
 
     def check_and_form(self) -> None:

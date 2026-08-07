@@ -37,7 +37,7 @@ from .models import (
     WorkerStatus,
 )
 from .scheduler import Scheduler
-from .security import new_id, new_session_token, sign_session, verify_password, verify_session
+from .security import new_id, sign_session, verify_password, verify_session
 from .store import Store
 from .ws_hub import WsHub
 
@@ -174,14 +174,6 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if body.model not in settings.models:
             raise BadRequestError(f"Unknown model '{body.model}'.")
 
-        # One device == one worker: reject a second active worker for the same key/account+model.
-        existing = store.list_workers_for_account(account_id)
-        if len(existing) >= settings.max_workers_per_account:
-            raise ConflictError("worker_limit", "Worker Limit", "Too many workers for this account.")
-        for w in existing:
-            if w.model == body.model and w.status != WorkerStatus.registered:
-                raise ConflictError("worker_exists", "Worker Exists", "A worker for this model already exists.")
-
         rec = WorkerRecord(
             worker_id=new_id("wrk"),
             account_id=account_id,
@@ -193,7 +185,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             status=WorkerStatus.waitlisted,
             online=False,
         )
-        store.create_worker(rec)
+        # Atomic check-and-create: enforces the per-account cap and the
+        # one-device-one-worker rule without a race between concurrent calls.
+        if not store.create_worker_if_available(rec, settings.max_workers_per_account):
+            existing = store.list_workers_for_account(account_id)
+            if len(existing) >= settings.max_workers_per_account:
+                raise ConflictError("worker_limit", "Worker Limit", "Too many workers for this account.")
+            raise ConflictError("worker_exists", "Worker Exists", "A worker for this model already exists.")
         scheduler.check_and_form()
         # Re-read to reflect any immediate assignment.
         rec = store.get_worker(rec.worker_id)
