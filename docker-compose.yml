@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────
+# prima-pool-server — control plane (docker compose)
+# ─────────────────────────────────────────────────────────────
+# Deployed by the POOL OPERATOR on their own host. Providers do
+# NOT run this — they run prima-pool-client on their own devices.
+#
+#   cp .env.example .env   # edit
+#   docker compose up -d
+# ─────────────────────────────────────────────────────────────
+name: prima-pool-server
+
+services:
+  server:
+    build: .
+    image: prima-pool-server:local
+    container_name: prima-pool-server
+    restart: unless-stopped
+    environment:
+      PRIMA_POOL_HOST: ${PRIMA_POOL_HOST:-0.0.0.0}
+      PRIMA_POOL_PORT: ${PRIMA_POOL_PORT:-8000}
+      PRIMA_POOL_DEV_INSECURE: ${PRIMA_POOL_DEV_INSECURE:-true}
+      # Publicly reachable base URL advertised in cluster config URLs.
+      PRIMA_POOL_PUBLIC_BASE_URL: ${PRIMA_POOL_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      # ⚠️ Set a strong secret in production.
+      PRIMA_POOL_SESSION_SECRET: ${PRIMA_POOL_SESSION_SECRET:-dev-session-secret-change-me}
+      PRIMA_POOL_MODELS: ${PRIMA_POOL_MODELS:-demo-model:4096}
+      PRIMA_POOL_HEARTBEAT_TIMEOUT_S: ${PRIMA_POOL_HEARTBEAT_TIMEOUT_S:-30}
+      PRIMA_POOL_HEARTBEAT_INTERVAL_S: ${PRIMA_POOL_HEARTBEAT_INTERVAL_S:-10}
+      PRIMA_POOL_ASSIGNABLE_GRACE_S: ${PRIMA_POOL_ASSIGNABLE_GRACE_S:-5}
+      PRIMA_POOL_READINESS_TIMEOUT_S: ${PRIMA_POOL_READINESS_TIMEOUT_S:-60}
+      PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT: ${PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT:-5}
+      PRIMA_POOL_WG_ENDPOINT_BASE: ${PRIMA_POOL_WG_ENDPOINT_BASE:-}
+      PRIMA_POOL_WG_MTU: ${PRIMA_POOL_WG_MTU:-1280}
+      PRIMA_POOL_RELAY_ENABLED: ${PRIMA_POOL_RELAY_ENABLED:-false}
+      PRIMA_POOL_RELAY_PUBKEY: ${PRIMA_POOL_RELAY_PUBKEY:-}
+      PRIMA_POOL_RELAY_ENDPOINT: ${PRIMA_POOL_RELAY_ENDPOINT:-}
+      PRIMA_POOL_STORE_PATH: /data/store.json
+    ports:
+      - "${PRIMA_POOL_PORT:-8000}:8000"
+    volumes:
+      - prima-pool-server-data:/data
+
+volumes:
+  prima-pool-server-data:
