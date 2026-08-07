@@ -5,8 +5,8 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
 from .errors import (
@@ -36,9 +36,11 @@ from .models import (
     WorkerState,
     WorkerStatus,
 )
+from .router import ClusterRouter
 from .scheduler import Scheduler
 from .security import new_id, sign_session, verify_password, verify_session
 from .store import Store
+from .wg_server import ServerWireGuard
 from .ws_hub import WsHub
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     store = store or Store(settings_path_from_env())
 
     hub = WsHub(store, settings)
-    scheduler = Scheduler(store, settings, hub)
+    wg_server = ServerWireGuard(settings)
+    scheduler = Scheduler(store, settings, hub, wg_server)
+    router = ClusterRouter(store, settings)
     monitor = LivenessMonitor(store, settings, scheduler)
 
     @asynccontextmanager
@@ -71,6 +75,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app.state.store = store
     app.state.hub = hub
     app.state.scheduler = scheduler
+    app.state.router = router
     app.add_exception_handler(ProblemError, problem_exception_handler)
 
     # ── auth helpers ─────────────────────────────────────────────────────
@@ -262,6 +267,56 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             members_ready=len(cluster.ready),
             members_total=len(cluster.members),
         )
+
+    # ── inference proxy (option A: server joins WG, proxies to head) ─────
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request, authorization: str | None = Header(None)):
+        """Proxy an OpenAI-compatible chat completion to a live cluster's head.
+
+        Auth: user-scoped API key (sk-user-...). The server finds a live cluster
+        for the requested model and forwards the request to the head's
+        llama-server over the WireGuard tunnel.
+        """
+        account_id, scope = _api_key(authorization)
+        if scope != "user":
+            raise ForbiddenError("Only a user key can send inference requests.")
+
+        body = await request.json()
+        model = body.get("model")
+        if not model:
+            raise BadRequestError("Missing 'model' in request body.")
+
+        cluster = router.find_live_cluster(model)
+        if cluster is None:
+            raise NotFoundError(f"No live cluster available for model '{model}'.")
+        head_url = router.head_url(cluster)
+        if head_url is None:
+            raise NotFoundError("Cluster has no head to route to.")
+
+        import httpx
+
+        target = f"{head_url}/v1/chat/completions"
+        stream = bool(body.get("stream", False))
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                if stream:
+                    req = client.build_request("POST", target, json=body)
+                    resp = await client.send(req, stream=True)
+                    return StreamingResponse(
+                        resp.aiter_bytes(),
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type", "text/event-stream"),
+                    )
+                resp = await client.post(target, json=body)
+                return JSONResponse(status_code=resp.status_code, content=resp.json())
+        except httpx.HTTPError as exc:
+            logger.error("proxy to %s failed: %s", target, exc)
+            raise ProblemError(
+                502,
+                "https://prima-pool.dev/errors/upstream_error",
+                "Upstream Error",
+                f"Failed to reach cluster head: {exc}",
+            )
 
     # ── WebSocket ────────────────────────────────────────────────────────
     @app.websocket("/v1/workers/{worker_id}/events")

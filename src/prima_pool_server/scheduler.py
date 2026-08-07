@@ -20,15 +20,17 @@ from .models import (
     WorkerStatus,
 )
 from .store import Store
+from .wg_server import ServerWireGuard
 
 logger = logging.getLogger(__name__)
 
 
 class Scheduler:
-    def __init__(self, store: Store, settings: Settings, hub) -> None:
+    def __init__(self, store: Store, settings: Settings, hub, wg_server: ServerWireGuard | None = None) -> None:
         self.store = store
         self.settings = settings
         self.hub = hub  # WsHub, set after construction to avoid circular import
+        self.wg_server = wg_server or ServerWireGuard(settings)
 
     def _waitlist(self, model: str) -> list[WorkerRecord]:
         """Waitlisted, online, assignable workers for a model, FIFO by creation."""
@@ -71,7 +73,11 @@ class Scheduler:
         return [f"{self.settings.cluster_subnet_prefix}.{third}.{i}" for i in range(1, n + 1)]
 
     def _build_cluster_config(self, cluster: ClusterRecord) -> dict:
-        """Build the per-member WireGuard config (ring order = peers order)."""
+        """Build the per-member WireGuard config (ring order = peers order).
+
+        If the server joins the WG network, the server is appended as an extra
+        peer so members can reach it (and it can reach them).
+        """
         settings = self.settings
         members = [self.store.get_worker(wid) for wid in cluster.members]
         members = [m for m in members if m is not None]
@@ -91,6 +97,11 @@ class Scheduler:
                     "preferred": "relay" if member.endpoint.behind_nat else "direct",
                 }
             )
+
+        # Append the server as a peer so members can reach the control plane
+        # over the tunnel (option A: server joins the cluster network).
+        if self.wg_server.enabled:
+            peers.append(self.wg_server.server_peer(cluster))
 
         relay = {
             "pubkey": settings.relay_pubkey,
@@ -175,6 +186,13 @@ class Scheduler:
             )
 
         logger.info("formed cluster %s for model %s (%d members)", cluster_id, model, len(chosen))
+        # Option A: the server joins the cluster's WG network so it can proxy
+        # requests to the head. Do this after members are assigned.
+        if self.wg_server.enabled:
+            try:
+                self.wg_server.up(cluster, chosen)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("server failed to join cluster %s: %s", cluster_id, exc)
         return cluster
 
     def _dissolve_cluster(self, cluster: ClusterRecord, reason: str) -> None:
@@ -191,6 +209,12 @@ class Scheduler:
             self.store.update_worker(w)
         self.store.delete_cluster(cluster.cluster_id)
         logger.info("dissolved cluster %s (%s)", cluster.cluster_id, reason)
+        # Option A: the server leaves the cluster's WG network.
+        if self.wg_server.enabled:
+            try:
+                self.wg_server.down(cluster.cluster_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("server failed to leave cluster %s: %s", cluster.cluster_id, exc)
         # Notify members asynchronously (pass member ids explicitly, since their
         # cluster_id has already been cleared).
         self._schedule(

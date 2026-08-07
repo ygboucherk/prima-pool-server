@@ -47,10 +47,26 @@ class Settings:
 
     # Model registry (v0: static config)
     models: dict[str, int] = field(default_factory=lambda: _parse_models())
+    # The port the head's llama-server listens on (proxied by the server).
+    api_port: int = _env_int("PRIMA_POOL_API_PORT", 8080)
     # Cluster settings
     cluster_subnet_prefix: str = "10.23"
     wg_mtu: int = _env_int("PRIMA_POOL_WG_MTU", 1280)
     wg_persistent_keepalive: int = 25
+
+    # Server-side WireGuard (option A: server joins clusters to proxy requests).
+    # The server generates its own keypair and gets a private IP in each cluster
+    # subnet so it can reach the head's llama-server over the tunnel.
+    server_wg_private_key: str = os.environ.get("PRIMA_POOL_SERVER_WG_PRIVATE_KEY", "")
+    server_wg_listen_port: int = _env_int("PRIMA_POOL_SERVER_WG_LISTEN_PORT", 51821)
+    server_wg_interface: str = os.environ.get("PRIMA_POOL_SERVER_WG_INTERFACE", "prima-pool-srv")
+    server_wg_conf_dir: str = os.environ.get("PRIMA_POOL_SERVER_WG_CONF_DIR", "/etc/wireguard")
+    # Host IP advertised to workers as the server's WG endpoint.
+    server_wg_endpoint_host: str = os.environ.get("PRIMA_POOL_SERVER_WG_ENDPOINT_HOST", "")
+    # The server's private IP offset within each cluster subnet (e.g. .254).
+    server_wg_ip_offset: int = _env_int("PRIMA_POOL_SERVER_WG_IP_OFFSET", 254)
+    # Whether the server actually joins the WG network (proxy enabled).
+    server_join_wg: bool = _env_bool("PRIMA_POOL_SERVER_JOIN_WG", False)
 
     # Relay (not implemented in v0; present so configs can carry the field)
     relay_enabled: bool = _env_bool("PRIMA_POOL_RELAY_ENABLED", False)

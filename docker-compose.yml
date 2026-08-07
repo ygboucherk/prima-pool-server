@@ -34,9 +34,25 @@ services:
       PRIMA_POOL_RELAY_ENABLED: ${PRIMA_POOL_RELAY_ENABLED:-false}
       PRIMA_POOL_RELAY_PUBKEY: ${PRIMA_POOL_RELAY_PUBKEY:-}
       PRIMA_POOL_RELAY_ENDPOINT: ${PRIMA_POOL_RELAY_ENDPOINT:-}
+      # ── Server-side WireGuard (option A: server joins clusters to proxy) ──
+      # Enable to let the server join cluster WG networks and proxy requests.
+      PRIMA_POOL_SERVER_JOIN_WG: ${PRIMA_POOL_SERVER_JOIN_WG:-false}
+      PRIMA_POOL_SERVER_WG_PRIVATE_KEY: ${PRIMA_POOL_SERVER_WG_PRIVATE_KEY:-}
+      PRIMA_POOL_SERVER_WG_LISTEN_PORT: ${PRIMA_POOL_SERVER_WG_LISTEN_PORT:-51821}
+      PRIMA_POOL_SERVER_WG_INTERFACE: ${PRIMA_POOL_SERVER_WG_INTERFACE:-prima-pool-srv}
+      PRIMA_POOL_SERVER_WG_CONF_DIR: /etc/wireguard
+      # Publicly reachable host IP advertised to workers as the server's WG endpoint.
+      PRIMA_POOL_SERVER_WG_ENDPOINT_HOST: ${PRIMA_POOL_SERVER_WG_ENDPOINT_HOST:-}
+      PRIMA_POOL_SERVER_WG_IP_OFFSET: ${PRIMA_POOL_SERVER_WG_IP_OFFSET:-254}
+      PRIMA_POOL_API_PORT: ${PRIMA_POOL_API_PORT:-8080}
       PRIMA_POOL_STORE_PATH: /data/store.json
     ports:
       - "${PRIMA_POOL_PORT:-8000}:8000"
+      - "${PRIMA_POOL_SERVER_WG_LISTEN_PORT:-51821}:51821/udp"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - prima-pool-server-data:/data
 
