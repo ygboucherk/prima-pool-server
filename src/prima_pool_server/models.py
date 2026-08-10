@@ -199,6 +199,12 @@ class ApiKeyRecord:
     scope: str
     key_hash: str
     created_at: float
+    # Optional link to the worker registered with this key. Set at
+    # registration so a worker-scoped key uniquely identifies its worker,
+    # even when several workers belong to the same account (needed to
+    # disambiguate cluster readiness/config when >1 worker of an account is
+    # in the same cluster).
+    worker_id: str | None = None
 
 
 @dataclass

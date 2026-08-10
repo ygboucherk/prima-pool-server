@@ -53,10 +53,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
     name       TEXT NOT NULL,
     scope      TEXT NOT NULL,
     key_hash   TEXT UNIQUE NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    worker_id  TEXT REFERENCES workers(worker_id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_worker ON api_keys(worker_id);
 
 CREATE TABLE IF NOT EXISTS clusters (
     cluster_id TEXT PRIMARY KEY,
@@ -377,6 +379,20 @@ class Store:
                     (rec.key_id, rec.account_id, rec.name, rec.scope, rec.key_hash, rec.created_at),
                 )
         return rec, secret
+
+    def bind_api_key_to_worker(self, key_id: str, worker_id: str) -> None:
+        """Link a worker-scoped API key to the worker it registered.
+
+        This lets the key uniquely identify its worker even when several
+        workers belong to the same account (needed to disambiguate cluster
+        readiness/config when >1 worker of an account is in the same cluster).
+        """
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE api_keys SET worker_id = ? WHERE key_id = ?",
+                    (worker_id, key_id),
+                )
 
     def list_api_keys(self, account_id: str) -> list[ApiKeyRecord]:
         rows = self._fetch_all("SELECT * FROM api_keys WHERE account_id = ?", (account_id,))

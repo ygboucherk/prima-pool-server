@@ -149,8 +149,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError("The provided API key is not valid.")
         return rec.account_id, rec.scope
 
-    def _worker_credential(authorization: str | None) -> tuple[str, str]:
-        """Resolve (account_id, scope) from a worker-scoped credential.
+    def _worker_credential(authorization: str | None) -> tuple[str, str, str | None, str | None]:
+        """Resolve (account_id, scope, key_id, bound_worker_id) from a
+        worker-scoped credential.
 
         Accepts EITHER:
         - a worker-scoped API key (device path), or
@@ -158,14 +159,22 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
         User-scoped API keys are rejected. Raises UnauthorizedError if no valid
         credential, or ForbiddenError for a user-scoped key.
+
+        key_id is the id of the API key when authenticating with one (None for
+        session tokens). bound_worker_id is the worker that key registered
+        (None if the key has not yet been bound or auth is via session).
         """
         account_id: str | None = None
         scope: str | None = None
+        key_id: str | None = None
+        bound_worker_id: str | None = None
         if authorization and authorization.lower().startswith("bearer "):
             secret = authorization.split(" ", 1)[1].strip()
             rec = store.resolve_api_key(secret)
             if rec is not None:
                 account_id, scope = rec.account_id, rec.scope
+                key_id = rec.key_id
+                bound_worker_id = rec.worker_id
         if account_id is None:
             try:
                 account_id = _session_account(authorization)
@@ -176,7 +185,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError("The provided credentials are not valid.")
         if scope != "worker" and scope != "session":
             raise ForbiddenError("A user key cannot manage workers.")
-        return account_id, scope
+        return account_id, scope, key_id, bound_worker_id
 
     def _worker_from_key(authorization: str | None, worker_id: str) -> WorkerRecord:
         """Resolve a worker, authenticating with EITHER:
@@ -185,7 +194,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
         User-scoped API keys are rejected in both paths.
         """
-        account_id, _scope = _worker_credential(authorization)
+        account_id, _scope, _key_id, _bound = _worker_credential(authorization)
         w = store.get_worker(worker_id)
         if w is None:
             raise NotFoundError("Worker does not exist.")
@@ -193,11 +202,30 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise ForbiddenError("This credential does not own this worker.")
         return w
 
-    def _worker_account(authorization: str | None) -> str:
-        """Resolve the account_id from a worker-scoped credential (worker key
-        or account session). User-scoped API keys are rejected."""
-        account_id, _scope = _worker_credential(authorization)
-        return account_id
+    def _bound_worker(authorization: str | None, cluster_id: str) -> WorkerRecord:
+        """Resolve the specific worker for a cluster-scoped call.
+
+        Prefers the worker bound to the presenting API key (the key that
+        registered that worker). This is unambiguous when several workers of
+        one account are in the same cluster — e.g. one account running the
+        same model on multiple machines.
+
+        Falls back to "the account's only worker in this cluster" for session
+        tokens / unbound keys. Raises ForbiddenError if nothing matches.
+        """
+        account_id, _scope, _key_id, bound_worker_id = _worker_credential(authorization)
+        if bound_worker_id:
+            w = store.get_worker(bound_worker_id)
+            if w is not None and w.cluster_id == cluster_id:
+                return w
+        # Fallback: exactly one of this account's workers is in this cluster.
+        matches = [
+            w for w in store.list_workers()
+            if w.account_id == account_id and w.cluster_id == cluster_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        raise ForbiddenError("This credential does not own a member of this cluster.")
 
     # ── accounts ─────────────────────────────────────────────────────────
     @app.post("/v1/accounts/register", response_model=Account, status_code=201)
@@ -266,6 +294,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if scope != "worker":
             raise ForbiddenError("A user key cannot register workers.")
 
+        # Which API key is registering? We bind it to the created worker so a
+        # worker-scoped key later uniquely identifies its worker — required
+        # once one account may run several workers (same or different models).
+        rec_api_key = store.resolve_api_key(authorization.split(" ", 1)[1].strip())
+        bound_key_id = rec_api_key.key_id if rec_api_key else None
+
         model_def = settings.models.get(body.model)
         if model_def is None:
             raise BadRequestError(f"Unknown model '{body.model}'.")
@@ -327,6 +361,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             if len(existing) >= settings.max_workers_per_account:
                 raise ConflictError("worker_limit", "Worker Limit", "Too many workers for this account.")
             raise ConflictError("worker_exists", "Worker Exists", "A worker for this device already exists.")
+        # Bind the presenting key to this worker (enables unambiguous per-key
+        # worker identity for cluster readiness/config later).
+        if bound_key_id:
+            try:
+                store.bind_api_key_to_worker(bound_key_id, rec.worker_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to bind key %s to worker %s: %s", bound_key_id, rec.worker_id, exc)
         scheduler.check_and_form()
         # Re-read to reflect any immediate assignment.
         rec = store.get_worker(rec.worker_id)
@@ -371,28 +412,32 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     # ── clusters ─────────────────────────────────────────────────────────
     @app.get("/v1/clusters/{cluster_id}/config", response_model=ClusterConfig)
     async def get_cluster_config(cluster_id: str, authorization: str | None = Header(None)):
-        account_id = _worker_account(authorization)
         cluster = store.get_cluster(cluster_id)
         if cluster is None:
             raise NotFoundError("Cluster does not exist.")
-        # The requesting account must own a worker that is a member.
-        worker = next((w for w in store.list_workers() if w.account_id == account_id and w.cluster_id == cluster_id), None)
-        if worker is None:
-            raise ForbiddenError("This credential does not own a member of this cluster.")
+        # The presenting credential must own a member of this cluster. With
+        # multiple same-account workers in one cluster, the key's bound worker
+        # disambiguates which one this is.
+        worker = _bound_worker(authorization, cluster_id)
         config = scheduler._build_cluster_config(cluster)
         config["interface"]["private_ip"] = worker.assigned_ip
         return ClusterConfig(**config)
 
     @app.post("/v1/clusters/{cluster_id}/ready", response_model=ClusterStatusResponse, status_code=202)
     async def report_ready(cluster_id: str, body: ReportReadyRequest, authorization: str | None = Header(None)):
-        account_id = _worker_account(authorization)
         cluster = store.get_cluster(cluster_id)
         if cluster is None:
             raise NotFoundError("Cluster does not exist.")
-        worker = next((w for w in store.list_workers() if w.account_id == account_id and w.cluster_id == cluster_id), None)
-        if worker is None:
-            raise ForbiddenError("This credential does not own a member of this cluster.")
+        # Identify the reporting member precisely: with one account running
+        # several workers in the same cluster, the old account-wide lookup
+        # attributed every report to the SAME worker, so the cluster never
+        # went live. The key's bound worker fixes this.
+        worker = _bound_worker(authorization, cluster_id)
         status = scheduler.on_ready(cluster_id, worker.worker_id)
+        # on_ready mutates its own in-memory ClusterRecord; re-read so the
+        # response reflects the updated ready set (the first read above is a
+        # different object).
+        cluster = store.get_cluster(cluster_id) or cluster
         return ClusterStatusResponse(
             cluster_id=cluster_id,
             status=status,

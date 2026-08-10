@@ -65,11 +65,11 @@ def _login(client: TestClient, username="alice", password="hunter2hunter2"):
     return r.json()
 
 
-def _create_worker_key(client: TestClient, account_id: str, session_token: str):
+def _create_worker_key(client: TestClient, account_id: str, session_token: str, name="worker"):
     r = client.post(
         f"/v1/accounts/{account_id}/keys",
         headers={"Authorization": f"Bearer {session_token}"},
-        json={"name": "worker", "scope": "worker"},
+        json={"name": name, "scope": "worker"},
     )
     assert r.status_code == 201, r.text
     return r.json()["api_key"]
@@ -238,6 +238,54 @@ def test_cluster_formation_after_grace_period(client_with_grace, settings_with_g
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "assigned", st1
     assert st1["cluster"] is not None
+
+
+def test_same_account_two_workers_same_cluster_both_ready(client: TestClient):
+    """Regression: two workers of ONE account in the SAME cluster must BOTH be
+    able to report ready, and the cluster must go live.
+
+    The old code resolved the reporting member by account_id + cluster_id with
+    a `next()`, which attributed both readiness reports to the SAME worker —
+    so with one account running two machines, the cluster never went live.
+    """
+    acc = _register_account(client)
+    sess = _login(client)
+    key1 = _create_worker_key(client, acc["account_id"], sess["session_token"], "device-1")
+    key2 = _create_worker_key(client, acc["account_id"], sess["session_token"], "device-2")
+
+    w1 = _register_worker(client, key1, wg_pubkey="pubkey-device-1", memory_mb=2048).json()
+    w2 = _register_worker(client, key2, wg_pubkey="pubkey-device-2", memory_mb=2048).json()
+    assert w1["worker_id"] != w2["worker_id"]
+
+    # Heartbeat both → cluster forms (2048+2048 = 4096).
+    client.post(f"/v1/workers/{w1['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key1}"})
+    client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
+
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    assert st1["status"] == "assigned", st1
+    cluster_id = st1["cluster"]["cluster_id"]
+    assert st1["cluster"]["assigned_ip"] != 0
+
+    st2 = client.get(f"/v1/workers/{w2['worker_id']}/state", headers={"Authorization": f"Bearer {key2}"}).json()
+    assert st2["status"] == "assigned", st2
+    assert st2["cluster"]["cluster_id"] == cluster_id
+
+    # Both members must be able to GET the config with their own key.
+    cfg1 = client.get(f"/v1/clusters/{cluster_id}/config", headers={"Authorization": f"Bearer {key1}"})
+    assert cfg1.status_code == 200, cfg1.text
+    cfg2 = client.get(f"/v1/clusters/{cluster_id}/config", headers={"Authorization": f"Bearer {key2}"})
+    assert cfg2.status_code == 200, cfg2.text
+    # Each config carries the member's OWN private IP.
+    assert cfg1.json()["interface"]["private_ip"] == st1["cluster"]["assigned_ip"]
+    assert cfg2.json()["interface"]["private_ip"] == st2["cluster"]["assigned_ip"]
+
+    # Both report ready → live (each with its own key).
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    assert r1.status_code == 202 and r1.json()["status"] == "assembling", r1.text
+    r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
+    assert r2.status_code == 202, r2.text
+    assert r2.json()["status"] == "live", r2.text
+    assert r2.json()["members_ready"] == 2
 
 
 def test_cluster_ready_and_live(client: TestClient):
