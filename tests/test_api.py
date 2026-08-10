@@ -288,6 +288,58 @@ def test_same_account_two_workers_same_cluster_both_ready(client: TestClient):
     assert r2.json()["members_ready"] == 2
 
 
+def test_unbound_keys_self_heal_on_heartbeat(client: TestClient, store: Store):
+    """Regression: keys issued BEFORE the key→worker binding feature existed
+    are unbound. When one account has two workers in the SAME cluster, an
+    unbound key must still work for config/ready — the worker's heartbeat
+    (which carries worker_id) binds the key. Readiness then works for both.
+    """
+    acc = _register_account(client)
+    sess = _login(client)
+    key1 = _create_worker_key(client, acc["account_id"], sess["session_token"], "device-1")
+    key2 = _create_worker_key(client, acc["account_id"], sess["session_token"], "device-2")
+
+    w1 = _register_worker(client, key1, wg_pubkey="pubkey-device-1", memory_mb=2048).json()
+    w2 = _register_worker(client, key2, wg_pubkey="pubkey-device-2", memory_mb=2048).json()
+
+    # Simulate the UPGRADE path: registration now binds the key, but keys
+    # created before the feature shipped are unbound. Unbind both to emulate
+    # an existing pre-upgrade deployment.
+    conn = store._conn
+    for key in (key1, key2):
+        rec = store.resolve_api_key(key)
+        conn.execute("UPDATE api_keys SET worker_id = NULL WHERE key_id = ?", (rec.key_id,))
+    conn.commit()
+
+    # Sanity: keys are now unbound.
+    assert store.resolve_api_key(key1).worker_id is None
+    assert store.resolve_api_key(key2).worker_id is None
+
+    # Heartbeat both → cluster forms. The heartbeat heals each key's binding.
+    client.post(f"/v1/workers/{w1['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key1}"})
+    client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
+
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    assert st1["status"] == "assigned", st1
+    cluster_id = st1["cluster"]["cluster_id"]
+
+    # Both can fetch config now (their keys were bound by the heartbeats).
+    cfg1 = client.get(f"/v1/clusters/{cluster_id}/config", headers={"Authorization": f"Bearer {key1}"})
+    assert cfg1.status_code == 200, cfg1.text
+    cfg2 = client.get(f"/v1/clusters/{cluster_id}/config", headers={"Authorization": f"Bearer {key2}"})
+    assert cfg2.status_code == 200, cfg2.text
+
+    # Both report ready → live.
+    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
+    assert r2.json()["status"] == "live", r2.text
+    assert r2.json()["members_ready"] == 2
+
+    # Keys are now actually bound to the right workers.
+    assert store.resolve_api_key(key1).worker_id == w1["worker_id"]  # type: ignore[union-attr]
+    assert store.resolve_api_key(key2).worker_id == w2["worker_id"]  # type: ignore[union-attr]
+
+
 def test_cluster_ready_and_live(client: TestClient):
     key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
     key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)

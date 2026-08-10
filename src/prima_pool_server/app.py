@@ -193,13 +193,26 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         - the account session token that owns the worker (owner path).
 
         User-scoped API keys are rejected in both paths.
+
+        Side effect: if the caller used a worker API key and the key is not yet
+        bound (or bound to a different worker), it is (re)bound to `worker_id`.
+        This self-heals deployments that upgraded after keys were first issued —
+        a stale/unbound key becomes unambiguous for cluster config/ready on the
+        worker's next heartbeat.
         """
-        account_id, _scope, _key_id, _bound = _worker_credential(authorization)
+        account_id, _scope, key_id, bound_worker_id = _worker_credential(authorization)
         w = store.get_worker(worker_id)
         if w is None:
             raise NotFoundError("Worker does not exist.")
         if w.account_id != account_id:
             raise ForbiddenError("This credential does not own this worker.")
+        # Heal the key→worker binding if it's stale/missing (worker-key path).
+        if key_id and bound_worker_id != worker_id:
+            try:
+                store.bind_api_key_to_worker(key_id, worker_id)
+                logger.info("bound key %s to worker %s", key_id, worker_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to bind key %s to worker %s: %s", key_id, worker_id, exc)
         return w
 
     def _bound_worker(authorization: str | None, cluster_id: str) -> WorkerRecord:
@@ -213,7 +226,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         Falls back to "the account's only worker in this cluster" for session
         tokens / unbound keys. Raises ForbiddenError if nothing matches.
         """
-        account_id, _scope, _key_id, bound_worker_id = _worker_credential(authorization)
+        account_id, _scope, key_id, bound_worker_id = _worker_credential(authorization)
         if bound_worker_id:
             w = store.get_worker(bound_worker_id)
             if w is not None and w.cluster_id == cluster_id:
@@ -224,6 +237,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             if w.account_id == account_id and w.cluster_id == cluster_id
         ]
         if len(matches) == 1:
+            # Opportunistically bind the key so this is resolved via the key
+            # from now on (covers the very first config fetch, before any
+            # heartbeat had a chance to bind).
+            if key_id:
+                try:
+                    store.bind_api_key_to_worker(key_id, matches[0].worker_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("failed to bind key %s to worker %s: %s", key_id, matches[0].worker_id, exc)
             return matches[0]
         raise ForbiddenError("This credential does not own a member of this cluster.")
 
