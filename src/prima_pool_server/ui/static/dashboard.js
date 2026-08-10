@@ -12,7 +12,7 @@
     statusEl.className = 'status ' + (cls || '');
   }
 
-  async function api(path, options) {
+  async function api(path, options = {}) {
     const headers = Object.assign({ Accept: 'application/json' }, options.headers || {});
     if (sessionToken) headers.Authorization = 'Bearer ' + sessionToken;
     if (options.body) headers['Content-Type'] = 'application/json';
