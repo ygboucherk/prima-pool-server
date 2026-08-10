@@ -1,0 +1,1 @@
+"""Static GUI assets (dashboard HTML/CSS/JS)."""

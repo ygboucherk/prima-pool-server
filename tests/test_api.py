@@ -5,14 +5,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from prima_pool_server.app import create_app
-from prima_pool_server.config import Settings
+from prima_pool_server.config import ModelDef, Settings
 from prima_pool_server.store import Store
 
 
 @pytest.fixture()
 def settings() -> Settings:
     return Settings(
-        models={"demo-model": 4096},
+        models={
+            "demo-model": ModelDef(
+                slug="demo-model", gguf_sha256="a" * 64, required_memory_mb=4096
+            )
+        },
         assignable_grace_s=0,
         heartbeat_timeout_s=30,
     )
@@ -58,6 +62,7 @@ def _register_worker(client: TestClient, api_key: str, model="demo-model", memor
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": model,
+            "gguf_sha256": "a" * 64,
             "memory_allocated_mb": memory_mb,
             "wg_pubkey": wg_pubkey,
             "endpoint": {"host": "203.0.113.10", "port": 51820, "behind_nat": False, "nat_type": "none"},
@@ -198,3 +203,105 @@ def test_worker_key_cannot_access_other_worker(client: TestClient):
     key2 = _create_worker_key(client, acc2["account_id"], sess2["session_token"])
     r = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key2}"})
     assert r.status_code == 403
+
+
+# ── dual-auth: worker key OR account session ──────────────────────────────
+def test_session_token_can_access_own_worker_state(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, key, wg_pubkey="pubkey1").json()
+    # Owner session token (not the worker key) can read state.
+    r = client.get(
+        f"/v1/workers/{w['worker_id']}/state",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["worker_id"] == w["worker_id"]
+
+
+def test_session_token_can_heartbeat_own_worker(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, key, wg_pubkey="pubkey1").json()
+    r = client.post(
+        f"/v1/workers/{w['worker_id']}/heartbeat",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["online"] is True
+
+
+def test_session_token_can_revoke_own_worker(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, key, wg_pubkey="pubkey1").json()
+    r = client.delete(
+        f"/v1/workers/{w['worker_id']}",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+    )
+    assert r.status_code == 204
+    # Worker is gone.
+    r2 = client.get(
+        f"/v1/workers/{w['worker_id']}/state",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+    )
+    assert r2.status_code == 404
+
+
+def test_session_token_cannot_access_other_accounts_worker(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, key, wg_pubkey="pubkey1").json()
+    # Bob's session must NOT access Alice's worker.
+    _register_account(client, username="bob", password="hunter2hunter2")
+    bobs_sess = _login(client, username="bob")["session_token"]
+    r = client.get(
+        f"/v1/workers/{w['worker_id']}/state",
+        headers={"Authorization": f"Bearer {bobs_sess}"},
+    )
+    assert r.status_code == 403
+
+
+def test_user_key_still_rejected_for_workers(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    wkey = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, wkey, wg_pubkey="pubkey1").json()
+    # User-scoped key is created; it cannot manage workers.
+    ukey = client.post(
+        f"/v1/accounts/{acc['account_id']}/keys",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"name": "user", "scope": "user"},
+    ).json()["api_key"]
+    r = client.get(
+        f"/v1/workers/{w['worker_id']}/state",
+        headers={"Authorization": f"Bearer {ukey}"},
+    )
+    assert r.status_code == 403
+
+
+def test_session_token_can_fetch_cluster_config_as_member(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    wkey = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, wkey, wg_pubkey="pubkey1").json()
+    # Second account for cluster formation.
+    acc2 = _register_account(client, username="bob", password="hunter2hunter2")
+    sess2 = _login(client, username="bob")
+    wkey2 = _create_worker_key(client, acc2["account_id"], sess2["session_token"])
+    w2 = _register_worker(client, wkey2, wg_pubkey="pubkey2").json()
+    for wk, ww in ((wkey, w), (wkey2, w2)):
+        client.post(f"/v1/workers/{ww['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {wk}"})
+    st = client.get(f"/v1/workers/{w['worker_id']}/state", headers={"Authorization": f"Bearer {sess['session_token']}"}).json()
+    cluster_id = st["cluster"]["cluster_id"]
+    # Owner session can fetch the cluster config (it owns a member).
+    r = client.get(
+        f"/v1/clusters/{cluster_id}/config",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["cluster_id"] == cluster_id

@@ -24,6 +24,20 @@ def _env_int(name: str, default: int) -> int:
 
 
 @dataclass(frozen=True)
+class ModelDef:
+    """A model the pool serves: a slug, its exact GGUF hash, and required memory.
+
+    The GGUF hash is authoritative: a cluster only ever groups workers whose
+    `gguf_sha256` matches the registered hash, so mismatched models can never
+    be joined together.
+    """
+
+    slug: str
+    gguf_sha256: str
+    required_memory_mb: int
+
+
+@dataclass(frozen=True)
 class Settings:
     """Runtime settings, read from the environment."""
 
@@ -45,8 +59,8 @@ class Settings:
     # Worker policy
     max_workers_per_account: int = _env_int("PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT", 5)
 
-    # Model registry (v0: static config)
-    models: dict[str, int] = field(default_factory=lambda: _parse_models())
+    # Model registry (v0: static config). slug -> ModelDef.
+    models: dict[str, ModelDef] = field(default_factory=lambda: _parse_models())
     # The port the head's llama-server listens on (proxied by the server).
     api_port: int = _env_int("PRIMA_POOL_API_PORT", 8080)
     # Cluster settings
@@ -77,22 +91,33 @@ class Settings:
     ws_reconnect_backoff_s: list[int] = field(default_factory=lambda: [1, 30])
 
 
-def _parse_models() -> dict[str, int]:
-    """Parse PRIMA_POOL_MODELS as 'name:required_memory_mb[,name:required_memory_mb...]'.
+def _parse_models() -> dict[str, ModelDef]:
+    """Parse PRIMA_POOL_MODELS as 'name:gguf_sha256:required_memory_mb[, ...]'.
 
-    Example: PRIMA_POOL_MODELS="llama-3.1-8b-instruct:16384,qwen2.5-3b:6144"
+    Example:
+      PRIMA_POOL_MODELS="llama-3.1-8b-instruct:<sha256>:16384,qwen2.5-3b:<sha256>:6144"
+
+    The GGUF hash is the authoritative identity of the model — a cluster only
+    groups workers whose advertised hash matches it.
     """
-    raw = os.environ.get("PRIMA_POOL_MODELS", "demo-model:4096")
-    result: dict[str, int] = {}
+    raw = os.environ.get("PRIMA_POOL_MODELS", "demo-model:<no-hash>:4096")
+    result: dict[str, ModelDef] = {}
     for chunk in raw.split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
-        name, _, mem = chunk.partition(":")
-        name = name.strip()
+        parts = chunk.split(":")
+        name = parts[0].strip()
+        if not name:
+            continue
+        gguf_sha256 = parts[1].strip() if len(parts) > 1 else ""
         try:
-            required_mb = int(mem) if mem else 4096
+            required_mb = int(parts[2]) if len(parts) > 2 else 4096
         except ValueError:
             required_mb = 4096
-        result[name] = required_mb
+        result[name] = ModelDef(
+            slug=name,
+            gguf_sha256=gguf_sha256,
+            required_memory_mb=required_mb,
+        )
     return result

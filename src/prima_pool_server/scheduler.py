@@ -32,13 +32,14 @@ class Scheduler:
         self.hub = hub  # WsHub, set after construction to avoid circular import
         self.wg_server = wg_server or ServerWireGuard(settings)
 
-    def _waitlist(self, model: str) -> list[WorkerRecord]:
-        """Waitlisted, online, assignable workers for a model, FIFO by creation."""
+    def _waitlist(self, model: str, gguf_sha256: str) -> list[WorkerRecord]:
+        """Waitlisted, online, assignable workers for a (model, hash), FIFO."""
         now = time.time()
         workers = [
             w
             for w in self.store.list_workers()
             if w.model == model
+            and w.gguf_sha256 == gguf_sha256
             and w.status == WorkerStatus.waitlisted
             and w.online
             and w.assignable_at <= now
@@ -101,6 +102,11 @@ class Scheduler:
         # Append the server as a peer so members can reach the control plane
         # over the tunnel (option A: server joins the cluster network).
         if self.wg_server.enabled:
+            if not self.wg_server.has_endpoint:
+                logger.warning(
+                    "server WG join enabled but PRIMA_POOL_SERVER_WG_ENDPOINT_HOST "
+                    "is not set; workers cannot reach the server peer"
+                )
             peers.append(self.wg_server.server_peer(cluster))
 
         relay = {
@@ -132,11 +138,16 @@ class Scheduler:
             logger.warning("no running event loop; dropping async notification")
 
     def _form_cluster(self, model: str) -> ClusterRecord | None:
-        """Form a cluster from the waitlist if enough memory is available."""
-        required = self.settings.models.get(model)
-        if required is None:
+        """Form a cluster from the waitlist if enough memory is available.
+
+        Workers are matched per (model, gguf_sha256): a cluster only ever
+        groups workers serving the exact same GGUF (same model, same
+        quantization). Mismatched hashes are never joined.
+        """
+        model_def = self.settings.models.get(model)
+        if model_def is None:
             return None
-        waitlist = self._waitlist(model)
+        waitlist = self._waitlist(model, model_def.gguf_sha256)
         if not waitlist:
             return None
 
@@ -145,9 +156,9 @@ class Scheduler:
         for w in waitlist:
             chosen.append(w)
             total += w.memory_allocated_mb
-            if total >= required:
+            if total >= model_def.required_memory_mb:
                 break
-        if total < required:
+        if total < model_def.required_memory_mb:
             return None
 
         cluster_id = security.new_id("clu")

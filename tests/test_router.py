@@ -1,16 +1,19 @@
 """Tests for the cluster router and server-side WireGuard peer."""
 from __future__ import annotations
 
-from prima_pool_server.config import Settings
+from prima_pool_server.config import ModelDef, Settings
 from prima_pool_server.models import ClusterRecord, ClusterStatus
 from prima_pool_server.router import ClusterRouter
 from prima_pool_server.store import Store
 from prima_pool_server.wg_server import ServerWireGuard, derive_public_key, generate_keypair
 
 
+DEMO = ModelDef(slug="demo-model", gguf_sha256="a" * 64, required_memory_mb=4096)
+
+
 def _settings(**kw) -> Settings:
     defaults = dict(
-        models={"demo-model": 4096},
+        models={"demo-model": DEMO},
         server_join_wg=True,
         server_wg_endpoint_host="203.0.113.99",
         server_wg_listen_port=51821,

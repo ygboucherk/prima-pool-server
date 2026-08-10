@@ -8,14 +8,14 @@ per-model waitlists, and cluster formation. This is the core of the negotiation 
 ```
 Account (username + password)  ── owns ──▶  scoped API keys
                                               ├─ worker key  → worker device → waitlist → cluster
-                                              └─ user key    → sends requests (API deferred to v1)
+                                              └─ user key    → sends requests via /chat/completions
 ```
 
 - **Account** is a pure identity: a username and a password. It is **not tied to hardware**. It
   owns scoped API keys and (in the future) the billing balance.
 - **Scoped API key** is a credential restricted to one scope. A **worker key** lets a device
-  register as a worker and provide compute. A **user key** lets a client send requests (the request
-  API is out of v0 scope).
+  register as a worker and provide compute. A **user key** lets a client send inference requests
+  through `POST /v1/chat/completions` (proxied to a live cluster's head).
 - **Worker** is a distinct device entity that logs in with a worker key. Because prima.cpp shards a
   model across nodes and **every node must hold a copy of the model weights**, a device must pick a
   model before it can join anything. So the model is a property of the **worker**, not of the
@@ -73,8 +73,10 @@ To manage API keys, the account logs in and receives a short-lived session token
 
 **Errors** — `401 invalid_credentials`.
 
-The session token is used to create/list/revoke API keys (below). It is **not** used by worker
-devices or request clients; those use scoped API keys.
+The session token is used to manage API keys (below) **and** — with the worker endpoints'
+dual-auth — to access workers the session's account owns (see
+[assignment.md](assignment.md#authorization)). Session tokens embed the `account_id` and are
+short-lived (default 1 h). Worker devices use worker-scoped API keys, not session tokens.
 
 ## 3. Scoped API keys
 
@@ -124,7 +126,9 @@ entity and adds it to `model.waitlist`.
 > **Authorization scope**: a worker key may only register a worker, and may only operate *the
 > worker it created*. It cannot list/manage other workers, cannot manage the account, and cannot
 > send requests. All worker-scoped endpoints (`state`, `heartbeat`, `DELETE /workers/{id}`, the
-> WS channel) enforce that the authenticated key owns the target `worker_id`.
+> WS channel) accept EITHER the worker-scoped key OR the owning account's session token
+> (dual-auth); both must point at the same `worker_id` owned by the account. User-scoped API keys
+> are rejected.
 
 ### `POST /v1/workers/register`  (auth: worker key)
 
@@ -133,6 +137,7 @@ entity and adds it to `model.waitlist`.
 ```json
 {
   "model": "llama-3.1-8b-instruct",
+  "gguf_sha256": "3f9c2a5e...64_hex_chars",
   "memory_allocated_mb": 16384,
   "wg_pubkey": "base64_encoded_curve25519_public_key",
   "endpoint": {
@@ -153,6 +158,10 @@ entity and adds it to `model.waitlist`.
 
 Notes:
 
+- `gguf_sha256` is the SHA-256 of the worker's GGUF file. The server only groups
+  workers whose hash matches the registered model's hash — a mismatched GGUF is
+  **rejected at registration** (400), so a cluster always runs the same model with
+  the same quantization. Use `GET /v1/models` to see the pool's registered hashes.
 - `memory_allocated_mb` is **self-declared** in v0. Verifying it against hardware is an open
   problem.
 - `wg_pubkey` and `endpoint` are the device's **own WireGuard interface**, generated locally. The
@@ -192,12 +201,18 @@ currently part of an active cluster (v1+).
 
 ## 5. Waitlist and cluster formation
 
-- The server maintains a **per-model waitlist** of workers with `status: waitlisted`.
+- The server maintains a **per-(model, gguf_sha256) waitlist** of workers with
+  `status: waitlisted`. Because every node must hold a copy of the exact same model weights,
+  workers are only grouped with others that advertise the **same GGUF hash** (same model, same
+  quantization) — a mismatched file can never join a cluster.
 - The server groups workers into a **cluster** when
   `sum(worker.memory_allocated_mb for worker in model.waitlist) >= model.required_memory_mb`.
 - Exactly how many workers get grouped, and in what order, is the **scheduler's** job
   (see [scheduler.md](../../design/scheduler.md)). The protocol only defines the trigger and the
   resulting assignment.
+- The pool's registered models (slug + authoritative GGUF hash + required memory) are
+  discoverable via the unauthenticated `GET /v1/models`. A worker that advertises a hash
+  different from the registered one is rejected at registration (400).
 
 When the server forms a cluster, it:
 

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>prima-pool — operator dashboard</title>
+  <link rel="stylesheet" href="/ui/static/dashboard.css">
+</head>
+<body>
+  <header>
+    <h1>prima-pool</h1>
+    <span class="subtitle">account dashboard</span>
+    <div class="status" id="connection-status">…</div>
+  </header>
+
+  <main>
+    <section id="login" class="login">
+      <h2>Log in</h2>
+      <form id="login-form">
+        <input type="text" id="login-username" placeholder="username" autocomplete="username" required>
+        <input type="password" id="login-password" placeholder="password" autocomplete="current-password" required>
+        <button type="submit">Log in</button>
+      </form>
+      <p class="hint">Uses the same session token as <code>POST /v1/accounts/login</code>.</p>
+    </section>
+
+    <section id="view" hidden>
+      <div class="cards">
+        <div class="card"><div class="value" id="stat-account">—</div><div class="label">Account</div></div>
+        <div class="card"><div class="value" id="stat-workers">—</div><div class="label">Workers</div></div>
+        <div class="card"><div class="value" id="stat-online">—</div><div class="label">Online</div></div>
+        <div class="card"><div class="value" id="stat-keys">—</div><div class="label">API keys</div></div>
+      </div>
+
+      <section>
+        <h2>Workers</h2>
+        <table>
+          <thead><tr><th>Worker</th><th>Model</th><th>Status</th><th>Online</th><th>Memory</th><th>Cluster</th></tr></thead>
+          <tbody id="workers-body"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>API keys</h2>
+        <table>
+          <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+      </section>
+    </section>
+  </main>
+
+  <script src="/ui/static/dashboard.js"></script>
+</body>
+</html>

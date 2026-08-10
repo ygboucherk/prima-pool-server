@@ -118,6 +118,56 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /accounts/{account_id}/dashboard:
+    get:
+      tags: [accounts]
+      operationId: accountDashboard
+      summary: Account-scoped dashboard data (workers + keys).
+      description: >
+        Used by the static GUI at /ui. Returns the account's workers and API
+        keys. Auth: the account's session token (from /accounts/login).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: Dashboard data.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  account_id: { type: string }
+                  username: { type: string }
+                  workers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        worker_id: { type: string }
+                        model: { type: string }
+                        status:
+                          type: string
+                          enum: [registered, waitlisted, assigned]
+                        online: { type: boolean }
+                        memory_mb: { type: integer }
+                        cluster_id: { type: string }
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key_id: { type: string }
+                        name: { type: string }
+                        scope: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /accounts/{account_id}/keys/{key_id}:
     delete:
       tags: [accounts]
@@ -137,6 +187,26 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /models:
+    get:
+      tags: [clusters]
+      operationId: listModels
+      summary: List the models the pool serves (public, unauthenticated).
+      description: >
+        Each entry includes the model slug, its exact GGUF SHA-256, the required
+        memory, and whether a live cluster currently serves it. Users can use this
+        to discover available models and how to refer to them in
+        /chat/completions.
+      responses:
+        "200":
+          description: List of available models.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelInfo"
 
   /workers/register:
     post:
@@ -333,7 +403,12 @@ components:
     sessionAuth:
       type: http
       scheme: bearer
-      description: Short-lived session token from /accounts/login, e.g. `sess_...`.
+      description: >
+        Short-lived session token from /accounts/login, e.g. `sess_...`.
+        On worker endpoints (`/workers/...`, `/clusters/.../config`,
+        `/clusters/.../ready`, the WS channel), EITHER the worker-scoped API
+        key OR the owning account's session token is accepted (both must own
+        the target worker).
   parameters:
     AccountId:
       name: account_id
@@ -498,6 +573,15 @@ components:
         os: { type: string }
         prima_version: { type: string }
 
+    ModelInfo:
+      type: object
+      required: [slug, gguf_sha256, required_memory_mb, live]
+      properties:
+        slug: { type: string }
+        gguf_sha256: { type: string, minLength: 64, maxLength: 64 }
+        required_memory_mb: { type: integer }
+        live: { type: boolean, description: A live cluster currently serves this model }
+
     EndpointInfo:
       type: object
       required: [host, port, behind_nat, nat_type]
@@ -511,9 +595,18 @@ components:
 
     RegisterWorkerRequest:
       type: object
-      required: [model, memory_allocated_mb, wg_pubkey, endpoint]
+      required: [model, gguf_sha256, memory_allocated_mb, wg_pubkey, endpoint]
       properties:
         model: { type: string }
+        gguf_sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          description: >
+            SHA-256 of the worker's GGUF file. The server only groups workers
+            whose hash matches the registered model's hash — a mismatched GGUF
+            is rejected, so a cluster always runs the same model with the same
+            quantization.
         memory_allocated_mb: { type: integer, minimum: 1 }
         wg_pubkey:
           type: string

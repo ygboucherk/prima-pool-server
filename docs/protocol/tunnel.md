@@ -50,11 +50,29 @@ v0 does **not** auto-evict; it only records liveness.
 ### Heartbeat
 
 `POST /v1/workers/{id}/heartbeat` — `200 OK`, body optional (server may return cadence
-adjustments). Auth: the worker key that owns `{id}`; a key cannot heartbeat another worker. The
-server may return `{ "status": "waitlisted" }` to signal the worker has been re-added to the
-waitlist after being offline.
+adjustments). Auth: the worker key that owns `{id}` **or** the owning account's session token
+(dual-auth); a credential cannot heartbeat another worker. The server may return
+`{ "status": "waitlisted" }` to signal the worker has been re-added to the waitlist after being
+offline.
 
-## 3. Direct-first, relay fallback (tunnel details)
+## 3. Server joins the cluster network (option A, inference proxy)
+
+When the pool operator enables `PRIMA_POOL_SERVER_JOIN_WG=true`, the server joins each
+cluster's WireGuard network so it can proxy inference requests to the head (rank 0, which runs
+`llama-server` on `PRIMA_POOL_API_PORT`, default 8080):
+
+- The server generates its own WG keypair and gets a private IP in each cluster subnet (default
+  `.254`).
+- The server is added as a peer in every member's config with `role: "server"` — it is **not** a
+  ring member; clients exclude it from ring topology.
+- The server brings up a `prima-pool-srv-<cluster>` interface per cluster and tears it down on
+  dissolution.
+
+The server then serves `POST /v1/chat/completions` (auth: user-scoped key), proxying the request
+over the tunnel to the head. This requires `NET_ADMIN` + `/dev/net/tun` on the server and a
+publicly reachable `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST`.
+
+## 4. Direct-first, relay fallback (tunnel details)
 
 **Direct path**
 
@@ -78,13 +96,13 @@ waitlist after being offline.
 | Direct handshake timeout (> 5 s)    | Switch to relay                            |
 | Direct keepalive loss (> 3 missed)  | Switch to relay, re-probe direct in background |
 
-## 4. Readiness timeout
+## 5. Readiness timeout
 
 The server waits up to **60 s** for all members to report readiness after the last
 `cluster_assigned` push; members that miss it are marked `failed` and cluster formation may be
 retried (see [assignment.md](assignment.md#5-readiness-handshake)).
 
-## 5. Leaving
+## 6. Leaving
 
 A worker leaves by:
 

@@ -5,14 +5,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from prima_pool_server.app import create_app
-from prima_pool_server.config import Settings
+from prima_pool_server.config import ModelDef, Settings
 from prima_pool_server.store import Store
 
 
 @pytest.fixture()
 def settings() -> Settings:
     return Settings(
-        models={"demo-model": 4096},
+        models={
+            "demo-model": ModelDef(
+                slug="demo-model", gguf_sha256="a" * 64, required_memory_mb=4096
+            )
+        },
         assignable_grace_s=0,
         heartbeat_timeout_s=30,
         server_join_wg=True,
@@ -61,6 +65,7 @@ def _new_worker(client: TestClient, username: str, wg_pubkey: str, memory_mb=204
         headers={"Authorization": f"Bearer {key}"},
         json={
             "model": "demo-model",
+            "gguf_sha256": "a" * 64,
             "memory_allocated_mb": memory_mb,
             "wg_pubkey": wg_pubkey,
             "endpoint": {"host": "203.0.113.10", "port": 51820, "behind_nat": False, "nat_type": "none"},

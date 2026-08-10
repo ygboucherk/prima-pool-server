@@ -6,7 +6,7 @@ handed to workers after cluster formation.
 ## 1. The WebSocket channel
 
 After registering, the worker device opens a WebSocket to the server, authenticated with its
-**worker-scoped key**:
+**worker-scoped key** (or, in dual-auth, the owning account's session token):
 
 ```
 wss://pool.example.com/v1/workers/{worker_id}/events?api_key=...
@@ -38,8 +38,10 @@ accelerator, not the source of truth.
 ### Authorization
 
 All worker-scoped endpoints (`GET /state`, `POST /heartbeat`, `DELETE /workers/{worker_id}`, the
-WS channel, and `POST /clusters/{id}/ready`) require the **worker key that owns the target
-`worker_id`**. A worker key cannot access another worker's state, heartbeat, or cluster config.
+WS channel, and `POST /clusters/{id}/ready`) accept **either** the worker-scoped API key that owns
+the target `worker_id` **or** the owning account's session token (dual-auth). A credential cannot
+access another account's worker, its state, heartbeat, cluster config, or events. User-scoped API
+keys are rejected.
 
 ### Cluster dissolution
 
@@ -127,6 +129,11 @@ Notes:
 
 - **Array order = ring order.** `peers[0]` is the ring head, `peers[1]` is next, etc. Every member
   receives the same ordered list and MUST build the same ring from it; the server is authoritative.
+- **Server peer (option A):** when the server joins the cluster's WG network
+  (`PRIMA_POOL_SERVER_JOIN_WG=true`), it is appended to `peers` with `role: "server"` and a
+  private IP (default `.254`) in the cluster subnet. The server peer is **not** a ring member —
+  clients MUST exclude peers with `role: "server"` when computing `WORLD`, `MASTER_IP`,
+  `NEXT_IP`, or ring position.
 - The worker **already has** its own WG keypair; it only needs `interface` + `peers` to bring up
   the tunnel.
 - `relay.enabled` tells the worker that a relay path exists and should be used as fallback.
@@ -134,7 +141,7 @@ Notes:
 
 ### Error
 
-If the requesting worker is not a member of the cluster: `403 not_a_member`.
+If the requesting credential does not own a member of the cluster: `403 not_a_member`.
 
 ## 4. Direct-first, relay fallback
 

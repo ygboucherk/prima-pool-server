@@ -7,16 +7,32 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 ## What it does
 
 - **Accounts** — register/login, scoped API keys (`worker` / `user`)
-- **Workers** — device registration, per-model waitlists, heartbeat-driven liveness
+- **Workers** — device registration, per-model waitlists, heartbeat-driven liveness;
+  worker endpoints accept EITHER the worker key OR the owning account's session token
 - **Clusters** — forms a prima.cpp ring when a model's waitlist has enough memory,
   hands out WireGuard configs (ring order = peer order), readiness handshake
+- **Model integrity** — the registry pins each model to an exact GGUF SHA-256;
+  workers advertise their file's hash at registration (mismatch → 400), and
+  clusters only ever group workers with identical hashes
+- **Model discovery** — `GET /v1/models` (unauthenticated) lists the pool's models,
+  their GGUF hashes, required memory, and current liveness
 - **WebSocket push** — `cluster_assigned` / `cluster_dissolved` frames (REST is the
   source of truth; WS is an accelerator)
 - **Inference proxy** — `POST /v1/chat/completions` (auth: user key) routes a request
   to a live cluster's head over the WireGuard tunnel (option A: the server joins the
   cluster WG network). See [Inference proxy](#inference-proxy).
+- **Account dashboard (static GUI)** — a static web page at `/ui` that logs in with a
+  session token and shows the account's workers + keys via `GET /v1/accounts/{id}/dashboard`.
 
 Out of scope for v0: usage/accounting, eviction/rebalance (churn), and the relay node.
+
+## GUI
+
+A static (no server-side templating) dashboard is served at `/ui`. It uses the
+standard API: log in via `POST /v1/accounts/login`, then fetch
+`GET /v1/accounts/{id}/dashboard` (session-token auth) to see the account's
+workers and API keys. The dashboard is account-scoped — it shows only what the
+logged-in account owns.
 
 ## Quick start (local)
 
@@ -82,7 +98,7 @@ All settings are read from `PRIMA_POOL_*` environment variables. See
 | `PRIMA_POOL_PORT` | `8000` | Bind port |
 | `PRIMA_POOL_PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Base URL advertised in config URLs |
 | `PRIMA_POOL_SESSION_SECRET` | dev value | HMAC secret for session tokens (**change in prod**) |
-| `PRIMA_POOL_MODELS` | `demo-model:4096` | Model registry `name:required_memory_mb[,..]` |
+| `PRIMA_POOL_MODELS` | `demo-model:<no-hash>:4096` | Model registry `name:gguf_sha256:required_memory_mb[,..]` |
 | `PRIMA_POOL_HEARTBEAT_TIMEOUT_S` | `30` | Missed-heartbeat offline threshold |
 | `PRIMA_POOL_HEARTBEAT_INTERVAL_S` | `10` | Suggested heartbeat cadence |
 | `PRIMA_POOL_ASSIGNABLE_GRACE_S` | `5` | Grace period before a re-added worker is assignable |

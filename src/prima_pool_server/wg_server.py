@@ -78,6 +78,11 @@ class ServerWireGuard:
         return self.settings.server_join_wg
 
     @property
+    def has_endpoint(self) -> bool:
+        """True if the server advertises a reachable WG endpoint to workers."""
+        return bool(self.settings.server_wg_endpoint_host)
+
+    @property
     def public_key(self) -> str:
         """Return the server's WG public key, generating a keypair if needed."""
         if not self._public_key:

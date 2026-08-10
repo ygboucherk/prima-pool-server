@@ -30,7 +30,7 @@ authenticated, negotiated peers.
 | **Liveness**  | `online`/`offline`, heartbeat-driven, orthogonal to registration          | [tunnel.md](tunnel.md#2-health-tracking-server-side) |
 | **Cluster**   | An *ordered* group of workers (a ring) serving one model                  | [assignment.md](assignment.md#3-cluster-config-wireguard) |
 | **Pool server**| The control plane: identities, waitlists, cluster formation, relay orchestration | [negotiation.md](negotiation.md#5-waitlist-and-cluster-formation) |
-| **Relay node**| A dedicated, publicly reachable WG relay for NAT'd members                 | [tunnel.md](tunnel.md#3-direct-first-relay-fallback-tunnel-details) |
+| **Relay node**| A dedicated, publicly reachable WG relay for NAT'd members                 | [tunnel.md](tunnel.md#4-direct-first-relay-fallback-tunnel-details) |
 
 ## Scope (v0)
 

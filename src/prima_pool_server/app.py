@@ -5,10 +5,14 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
+from .dashboard import build_account_overview
 from .errors import (
     BadRequestError,
     ConflictError,
@@ -24,9 +28,11 @@ from .models import (
     ApiKey,
     ApiKeySummary,
     ClusterConfig,
+    ClusterStatus,
     ClusterStatusResponse,
     CreateKeyRequest,
     LoginRequest,
+    ModelInfo,
     RegisterAccountRequest,
     RegisterWorkerRequest,
     ReportReadyRequest,
@@ -102,16 +108,55 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError("The provided API key is not valid.")
         return rec.account_id, rec.scope
 
-    def _worker_from_key(authorization: str | None, worker_id: str) -> WorkerRecord:
-        account_id, scope = _api_key(authorization)
-        if scope != "worker":
+    def _worker_credential(authorization: str | None) -> tuple[str, str]:
+        """Resolve (account_id, scope) from a worker-scoped credential.
+
+        Accepts EITHER:
+        - a worker-scoped API key (device path), or
+        - the account session token (owner path).
+
+        User-scoped API keys are rejected. Raises UnauthorizedError if no valid
+        credential, or ForbiddenError for a user-scoped key.
+        """
+        account_id: str | None = None
+        scope: str | None = None
+        if authorization and authorization.lower().startswith("bearer "):
+            secret = authorization.split(" ", 1)[1].strip()
+            rec = store.resolve_api_key(secret)
+            if rec is not None:
+                account_id, scope = rec.account_id, rec.scope
+        if account_id is None:
+            try:
+                account_id = _session_account(authorization)
+                scope = "session"
+            except UnauthorizedError:
+                pass
+        if account_id is None:
+            raise UnauthorizedError("The provided credentials are not valid.")
+        if scope != "worker" and scope != "session":
             raise ForbiddenError("A user key cannot manage workers.")
+        return account_id, scope
+
+    def _worker_from_key(authorization: str | None, worker_id: str) -> WorkerRecord:
+        """Resolve a worker, authenticating with EITHER:
+        - a worker-scoped API key (device path), or
+        - the account session token that owns the worker (owner path).
+
+        User-scoped API keys are rejected in both paths.
+        """
+        account_id, _scope = _worker_credential(authorization)
         w = store.get_worker(worker_id)
         if w is None:
             raise NotFoundError("Worker does not exist.")
         if w.account_id != account_id:
-            raise ForbiddenError("This key does not own this worker.")
+            raise ForbiddenError("This credential does not own this worker.")
         return w
+
+    def _worker_account(authorization: str | None) -> str:
+        """Resolve the account_id from a worker-scoped credential (worker key
+        or account session). User-scoped API keys are rejected."""
+        account_id, _scope = _worker_credential(authorization)
+        return account_id
 
     # ── accounts ─────────────────────────────────────────────────────────
     @app.post("/v1/accounts/register", response_model=Account, status_code=201)
@@ -176,13 +221,34 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if scope != "worker":
             raise ForbiddenError("A user key cannot register workers.")
 
-        if body.model not in settings.models:
+        model_def = settings.models.get(body.model)
+        if model_def is None:
             raise BadRequestError(f"Unknown model '{body.model}'.")
+
+        # The advertised GGUF hash must match the registered one — a cluster
+        # only ever groups workers with identical hashes, so reject mismatches
+        # at registration. If the registry hash is unset (dev default
+        # "<no-hash>"), integrity is NOT enforced here — but the scheduler
+        # still groups workers per advertised hash, so mismatches never mix
+        # within a cluster.
+        if not model_def.gguf_sha256:
+            logger.warning(
+                "model '%s' has no registered GGUF hash; hash integrity is not "
+                "enforced. Set PRIMA_POOL_MODELS with a real sha256 to enable it.",
+                body.model,
+            )
+        elif body.gguf_sha256 != model_def.gguf_sha256:
+            raise BadRequestError(
+                f"GGUF hash for model '{body.model}' does not match the pool's "
+                f"registered hash (advertised {body.gguf_sha256[:12]}…, expected "
+                f"{model_def.gguf_sha256[:12]}…)."
+            )
 
         rec = WorkerRecord(
             worker_id=new_id("wrk"),
             account_id=account_id,
             model=body.model,
+            gguf_sha256=body.gguf_sha256,
             memory_allocated_mb=body.memory_allocated_mb,
             wg_pubkey=body.wg_pubkey,
             endpoint=body.endpoint,
@@ -235,31 +301,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     # ── clusters ─────────────────────────────────────────────────────────
     @app.get("/v1/clusters/{cluster_id}/config", response_model=ClusterConfig)
     async def get_cluster_config(cluster_id: str, authorization: str | None = Header(None)):
-        account_id, scope = _api_key(authorization)
-        if scope != "worker":
-            raise ForbiddenError("A user key cannot fetch cluster config.")
+        account_id = _worker_account(authorization)
         cluster = store.get_cluster(cluster_id)
         if cluster is None:
             raise NotFoundError("Cluster does not exist.")
-        # The requesting worker must be a member.
+        # The requesting account must own a worker that is a member.
         worker = next((w for w in store.list_workers() if w.account_id == account_id and w.cluster_id == cluster_id), None)
         if worker is None:
-            raise ForbiddenError("This key does not own this worker.")
+            raise ForbiddenError("This credential does not own a member of this cluster.")
         config = scheduler._build_cluster_config(cluster)
         config["interface"]["private_ip"] = worker.assigned_ip
         return ClusterConfig(**config)
 
     @app.post("/v1/clusters/{cluster_id}/ready", response_model=ClusterStatusResponse, status_code=202)
     async def report_ready(cluster_id: str, body: ReportReadyRequest, authorization: str | None = Header(None)):
-        account_id, scope = _api_key(authorization)
-        if scope != "worker":
-            raise ForbiddenError("A user key cannot report readiness.")
+        account_id = _worker_account(authorization)
         cluster = store.get_cluster(cluster_id)
         if cluster is None:
             raise NotFoundError("Cluster does not exist.")
         worker = next((w for w in store.list_workers() if w.account_id == account_id and w.cluster_id == cluster_id), None)
         if worker is None:
-            raise ForbiddenError("This key does not own this worker.")
+            raise ForbiddenError("This credential does not own a member of this cluster.")
         status = scheduler.on_ready(cluster_id, worker.worker_id)
         return ClusterStatusResponse(
             cluster_id=cluster_id,
@@ -267,6 +329,25 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             members_ready=len(cluster.ready),
             members_total=len(cluster.members),
         )
+
+    # ── model discovery (unauthenticated overview) ────────────────────────
+    @app.get("/v1/models", response_model=list[ModelInfo])
+    async def list_models():
+        """List the models the pool serves. Unauthenticated (public overview).
+
+        Each entry includes the model slug, the exact GGUF SHA-256, the
+        required memory, and whether a live cluster currently serves it.
+        """
+        live_models = {c.model for c in store.list_clusters() if c.status == ClusterStatus.live}
+        return [
+            ModelInfo(
+                slug=md.slug,
+                gguf_sha256=md.gguf_sha256,
+                required_memory_mb=md.required_memory_mb,
+                live=md.slug in live_models,
+            )
+            for md in settings.models.values()
+        ]
 
     # ── inference proxy (option A: server joins WG, proxies to head) ─────
     @app.post("/v1/chat/completions")
@@ -318,6 +399,23 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 f"Failed to reach cluster head: {exc}",
             )
 
+    # ── GUI (static) ──────────────────────────────────────────────────────
+    # Serve the static dashboard, plus an account-scoped data endpoint.
+    # The GUI page is static; all data comes from the API (session token).
+    _ui_dir = Path(__file__).parent / "ui" / "static"
+    app.mount("/ui/static", StaticFiles(directory=_ui_dir), name="ui-static")
+
+    @app.get("/ui")
+    async def ui_dashboard():
+        return FileResponse(_ui_dir / "dashboard.html")
+
+    @app.get("/v1/accounts/{account_id}/dashboard")
+    async def account_dashboard(account_id: str, authorization: str | None = Header(None)):
+        session_account = _session_account(authorization)
+        if session_account != account_id:
+            raise ForbiddenError("Cannot view another account's dashboard.")
+        return build_account_overview(store, account_id)
+
     # ── WebSocket ────────────────────────────────────────────────────────
     @app.websocket("/v1/workers/{worker_id}/events")
     async def worker_events(websocket: WebSocket, worker_id: str, api_key: str | None = None):
@@ -330,12 +428,22 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if not secret:
             await websocket.close(code=4401)
             return
-        rec = store.resolve_api_key(secret)
-        if rec is None or rec.scope != "worker":
+        # Accept a worker key OR an account session token.
+        account_id: str | None = None
+        if secret.startswith("sess_"):
+            try:
+                account_id = verify_session(secret, settings.session_secret)[0]
+            except (TypeError, IndexError):
+                account_id = None
+        else:
+            rec = store.resolve_api_key(secret)
+            if rec is not None and rec.scope == "worker":
+                account_id = rec.account_id
+        if account_id is None:
             await websocket.close(code=4401)
             return
         w = store.get_worker(worker_id)
-        if w is None or w.account_id != rec.account_id:
+        if w is None or w.account_id != account_id:
             await websocket.close(code=4403)
             return
 

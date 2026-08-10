@@ -69,6 +69,10 @@ class Hardware(BaseModel):
 
 class RegisterWorkerRequest(BaseModel):
     model: str
+    # SHA-256 of the GGUF file this worker will serve. The server matches
+    # workers per (model, hash) so a cluster always runs the same model with
+    # the same quantization — mismatched GGUFs are never grouped together.
+    gguf_sha256: str = Field(min_length=64, max_length=64)
     memory_allocated_mb: int = Field(ge=1)
     wg_pubkey: str
     endpoint: EndpointInfo
@@ -132,6 +136,15 @@ class WorkerState(BaseModel):
     cluster: ClusterAssignment | None = None
 
 
+class ModelInfo(BaseModel):
+    """A model the pool serves, keyed by (slug, gguf_sha256)."""
+
+    slug: str
+    gguf_sha256: str
+    required_memory_mb: int
+    live: bool  # whether at least one live cluster currently serves it
+
+
 class InterfaceConfig(BaseModel):
     private_ip: str
     subnet: str
@@ -193,6 +206,7 @@ class WorkerRecord:
     worker_id: str
     account_id: str
     model: str
+    gguf_sha256: str
     memory_allocated_mb: int
     wg_pubkey: str
     endpoint: EndpointInfo

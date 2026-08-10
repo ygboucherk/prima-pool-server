@@ -26,6 +26,7 @@ def test_worker_persistence_roundtrip(tmp_path):
         worker_id="wrk_1",
         account_id="acc_1",
         model="demo-model",
+        gguf_sha256="a" * 64,
         memory_allocated_mb=2048,
         wg_pubkey="pub",
         endpoint=EndpointInfo(host="1.2.3.4", port=51820, behind_nat=True, nat_type="cone"),
@@ -38,6 +39,7 @@ def test_worker_persistence_roundtrip(tmp_path):
     s2 = Store(path=path)
     w = s2.get_worker("wrk_1")
     assert w is not None
+    assert w.gguf_sha256 == "a" * 64
     # endpoint/hardware must be restored as Pydantic objects, not strings.
     assert isinstance(w.endpoint, EndpointInfo)
     assert w.endpoint.host == "1.2.3.4"
