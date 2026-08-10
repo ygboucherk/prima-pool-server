@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
-CREATE INDEX IF NOT EXISTS idx_api_keys_worker ON api_keys(worker_id);
+-- idx_api_keys_worker is created in _migrate_schema (after the ALTER adds
+-- worker_id to pre-existing DBs).
 
 CREATE TABLE IF NOT EXISTS clusters (
     cluster_id TEXT PRIMARY KEY,
@@ -230,6 +231,7 @@ class Store:
         with self._lock:
             with self._conn:
                 self._conn.executescript(_SCHEMA)
+                self._migrate_schema()
 
     # ── low-level helpers ────────────────────────────────────────────────
     def _fetch_one(self, sql: str, params: tuple = ()):
@@ -251,6 +253,32 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    # ── schema migrations (idempotent) ───────────────────────────────────
+    def _migrate_schema(self) -> None:
+        """Bring an EXISTING database up to date, idempotently.
+
+        `CREATE TABLE IF NOT EXISTS` never adds columns to an existing table,
+        so schema additions must be applied explicitly. Runs after
+        `executescript(_SCHEMA)` on every open.
+        """
+        # v0.4: api_keys.worker_id links a worker key to the worker it
+        # registered (needed to disambiguate cluster readiness/config when one
+        # account runs several workers in the same cluster).
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(api_keys)")}
+        if "worker_id" not in cols:
+            # The FK is set NULL on worker delete; workers exists by now
+            # (created by _SCHEMA, workers table has no dep on api_keys).
+            self._conn.execute(
+                "ALTER TABLE api_keys ADD COLUMN worker_id TEXT "
+                "REFERENCES workers(worker_id) ON DELETE SET NULL"
+            )
+            logger.info("migrated api_keys: added column worker_id")
+        # The index is created here (not in _SCHEMA) so it never runs against
+        # a pre-existing api_keys table that lacks the column yet.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_api_keys_worker ON api_keys(worker_id)"
+        )
 
     # ── legacy migration ─────────────────────────────────────────────────
     def _find_legacy_json(self, db_path: str) -> str | None:

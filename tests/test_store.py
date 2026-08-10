@@ -62,6 +62,57 @@ def test_create_worker_if_available_rejects_same_device(tmp_path):
     assert not s.create_worker_if_available(_worker(acc.account_id, "wrk_2", "pub-a"), max_per_account=4)
 
 
+def test_migrate_existing_db_adds_api_key_worker_id(tmp_path):
+    """A pre-existing DB (created before api_keys.worker_id) must be upgraded
+    in place — CREATE TABLE IF NOT EXISTS never adds columns, so without the
+    migration the server crashes at startup on `no such column: worker_id`."""
+    import sqlite3
+
+    from prima_pool_server.security import hash_api_key
+
+    db = str(tmp_path / "store.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE accounts (account_id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL, created_at REAL NOT NULL);
+        CREATE TABLE api_keys (key_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+            name TEXT NOT NULL, scope TEXT NOT NULL, key_hash TEXT UNIQUE NOT NULL,
+            created_at REAL NOT NULL);
+        CREATE TABLE workers (worker_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+            model TEXT NOT NULL, gguf_sha256 TEXT NOT NULL, memory_allocated_mb INTEGER NOT NULL,
+            status TEXT NOT NULL, online INTEGER NOT NULL DEFAULT 0, cluster_id TEXT,
+            last_heartbeat REAL NOT NULL DEFAULT 0, assignable_at REAL NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL, wg_pubkey TEXT NOT NULL, endpoint_json TEXT NOT NULL,
+            hardware_json TEXT, assigned_ip TEXT, ring_position INTEGER);
+        """
+    )
+    conn.execute("INSERT INTO accounts VALUES ('acc_1','alice','h',1.0)")
+    conn.execute(
+        "INSERT INTO workers (worker_id, account_id, model, gguf_sha256, memory_allocated_mb, "
+        "status, created_at, wg_pubkey, endpoint_json) "
+        "VALUES ('wrk_1','acc_1','m','a'*64,4096,'waitlisted',1.0,'pk','null')"
+    )
+    key_hash = hash_api_key("sk-worker-test")
+    conn.execute(
+        "INSERT INTO api_keys (key_id, account_id, name, scope, key_hash, created_at) "
+        "VALUES ('key_1','acc_1','n','worker',?,1.0)",
+        (key_hash,),
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening with the current Store must migrate (no crash) and allow binding.
+    s = Store(path=db)
+    s.bind_api_key_to_worker("key_1", "wrk_1")
+    assert s.resolve_api_key("sk-worker-test").worker_id == "wrk_1"
+    s.close()
+
+    # Idempotent: reopening again is fine and the binding survives.
+    s2 = Store(path=db)
+    assert s2.resolve_api_key("sk-worker-test").worker_id == "wrk_1"
+
+
 def test_worker_persistence_roundtrip(tmp_path):
     path = str(tmp_path / "store.db")
     s = Store(path=path)
