@@ -361,8 +361,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         # Persist BEFORE the scheduler reads (SQLite reads from disk; the
         # scheduler must see online=True / assignable_at already written).
         store.update_worker(w)
-        if was_offline:
-            scheduler.check_and_form()
+        # Always re-check formation: a worker may have just become eligible
+        # (online long enough that assignable_at <= now). The old code only
+        # re-checked on offline→online transitions, so a pair of workers whose
+        # grace periods aligned after the last check stayed waitlisted forever.
+        scheduler.check_and_form()
         return w.to_worker()
 
     # ── clusters ─────────────────────────────────────────────────────────

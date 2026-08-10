@@ -1,6 +1,8 @@
 """End-to-end API tests for the control plane using FastAPI TestClient."""
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,6 +25,16 @@ def settings() -> Settings:
 
 
 @pytest.fixture()
+def settings_with_grace(settings: Settings) -> Settings:
+    """Same models, but a non-zero assignable grace period."""
+    return Settings(
+        models=settings.models,
+        assignable_grace_s=5,
+        heartbeat_timeout_s=30,
+    )
+
+
+@pytest.fixture()
 def store() -> Store:
     return Store(path=None)
 
@@ -30,6 +42,13 @@ def store() -> Store:
 @pytest.fixture()
 def client(settings: Settings, store: Store):
     app = create_app(settings=settings, store=store)
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture()
+def client_with_grace(settings_with_grace: Settings):
+    app = create_app(settings=settings_with_grace, store=Store(path=None))
     with TestClient(app) as c:
         yield c
 
@@ -187,6 +206,38 @@ def test_cluster_formation_and_config(client: TestClient):
     assert len(body["peers"]) == 2
     # Ring order: peers[0] is the head.
     assert body["peers"][0]["pubkey"] == "pubkey1"
+
+
+def test_cluster_formation_after_grace_period(client_with_grace, settings_with_grace, monkeypatch):
+    """Regression: with assignable_grace_s > 0, both workers need a SECOND
+    heartbeat before the cluster forms. The old code only re-checked formation
+    on offline→online transitions, so this scenario stayed waitlisted forever.
+    """
+    # Deterministic clock: keep real time as a base, but let the test advance it.
+    real_time = time.time
+    fake_now = [real_time()]
+    monkeypatch.setattr(time, "time", lambda: fake_now[0])
+
+    def advance(seconds: float):
+        fake_now[0] += seconds
+
+    client = client_with_grace
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+
+    # First heartbeat: worker comes online, assignable_at = now + 5s → NOT yet eligible.
+    client.post(f"/v1/workers/{w1['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key1}"})
+    client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    assert st1["status"] == "waitlisted", st1
+
+    # Advance past the grace period, then the next heartbeat must form the cluster.
+    advance(10.0)
+    client.post(f"/v1/workers/{w1['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key1}"})
+    client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    assert st1["status"] == "assigned", st1
+    assert st1["cluster"] is not None
 
 
 def test_cluster_ready_and_live(client: TestClient):
