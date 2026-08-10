@@ -410,13 +410,18 @@ class Store:
 
     def create_worker_if_available(self, rec: WorkerRecord, max_per_account: int) -> bool:
         """Atomically create a worker, enforcing the per-account worker cap and
-        the one-device-one-worker rule (one active worker per model per account)."""
+        the one-device-one-worker rule (one worker per WG pubkey per account).
+
+        Multiple workers may serve the same model — e.g. one account running
+        the same model on several machines. Only reuse of the SAME physical
+        device (same WG pubkey) is rejected.
+        """
         with self._lock:
             existing = self.list_workers_for_account(rec.account_id)
             if len(existing) >= max_per_account:
                 return False
             for w in existing:
-                if w.model == rec.model and w.status != WorkerStatus.registered:
+                if w.wg_pubkey == rec.wg_pubkey and w.status != WorkerStatus.registered:
                     return False
             try:
                 with self._conn:

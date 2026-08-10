@@ -320,12 +320,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             online=False,
         )
         # Atomic check-and-create: enforces the per-account cap and the
-        # one-device-one-worker rule without a race between concurrent calls.
+        # one-device-one-worker rule (one worker per WG pubkey) without a race
+        # between concurrent calls. Multiple workers may serve the same model.
         if not store.create_worker_if_available(rec, settings.max_workers_per_account):
             existing = store.list_workers_for_account(account_id)
             if len(existing) >= settings.max_workers_per_account:
                 raise ConflictError("worker_limit", "Worker Limit", "Too many workers for this account.")
-            raise ConflictError("worker_exists", "Worker Exists", "A worker for this model already exists.")
+            raise ConflictError("worker_exists", "Worker Exists", "A worker for this device already exists.")
         scheduler.check_and_form()
         # Re-read to reflect any immediate assignment.
         rec = store.get_worker(rec.worker_id)

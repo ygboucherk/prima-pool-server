@@ -138,6 +138,34 @@ def test_worker_heartbeat_marks_online(client: TestClient):
     assert r.json()["online"] is True
 
 
+def test_same_account_can_register_multiple_workers_same_model(client: TestClient):
+    """One account may run the same model on several machines (different WG pubkeys)."""
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+
+    w1 = _register_worker(client, key, wg_pubkey="pubkey-device-1").json()
+    w2 = _register_worker(client, key, wg_pubkey="pubkey-device-2").json()
+
+    assert w1["worker_id"] != w2["worker_id"]
+    assert w1["status"] == "waitlisted"
+    assert w2["status"] == "waitlisted"
+
+
+def test_same_device_cannot_register_twice(client: TestClient):
+    """The same physical device (same WG pubkey) cannot register a second worker."""
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+
+    r1 = _register_worker(client, key, wg_pubkey="pubkey-device-1")
+    assert r1.status_code == 201, r1.text
+
+    r2 = _register_worker(client, key, wg_pubkey="pubkey-device-1")
+    assert r2.status_code == 409, r2.text
+    assert "device" in r2.json()["detail"].lower()
+
+
 def test_cluster_formation_and_config(client: TestClient):
     # Two separate devices (accounts) that together meet the 4096 MB requirement.
     key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)

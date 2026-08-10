@@ -19,6 +19,49 @@ from prima_pool_server.models import (
 from prima_pool_server.store import Store
 
 
+def _worker(account_id: str, worker_id: str, wg_pubkey: str, model="demo-model") -> WorkerRecord:
+    return WorkerRecord(
+        worker_id=worker_id,
+        account_id=account_id,
+        model=model,
+        gguf_sha256="a" * 64,
+        memory_allocated_mb=2048,
+        wg_pubkey=wg_pubkey,
+        endpoint=EndpointInfo(host="1.2.3.4", port=51820, behind_nat=False, nat_type="none"),
+        hardware=None,
+        status=WorkerStatus.waitlisted,
+        online=True,
+    )
+
+
+def test_create_worker_if_available_cap(tmp_path):
+    s = Store(path=str(tmp_path / "store.db"))
+    acc = s.create_account("alice", "hunter2hunter2")
+    assert acc is not None
+    assert s.create_worker_if_available(_worker(acc.account_id, "wrk_1", "pub-a"), max_per_account=1)
+    # Cap reached — no more workers, even with a different pubkey.
+    assert not s.create_worker_if_available(_worker(acc.account_id, "wrk_2", "pub-b"), max_per_account=1)
+
+
+def test_create_worker_if_available_allows_same_model_different_device(tmp_path):
+    s = Store(path=str(tmp_path / "store.db"))
+    acc = s.create_account("alice", "hunter2hunter2")
+    assert acc is not None
+    assert s.create_worker_if_available(_worker(acc.account_id, "wrk_1", "pub-a"), max_per_account=4)
+    # Same model + different WG pubkey = a second device in the same account.
+    assert s.create_worker_if_available(_worker(acc.account_id, "wrk_2", "pub-b"), max_per_account=4)
+    assert len(s.list_workers_for_account(acc.account_id)) == 2
+
+
+def test_create_worker_if_available_rejects_same_device(tmp_path):
+    s = Store(path=str(tmp_path / "store.db"))
+    acc = s.create_account("alice", "hunter2hunter2")
+    assert acc is not None
+    assert s.create_worker_if_available(_worker(acc.account_id, "wrk_1", "pub-a"), max_per_account=4)
+    # Same WG pubkey = the same physical device re-registering.
+    assert not s.create_worker_if_available(_worker(acc.account_id, "wrk_2", "pub-a"), max_per_account=4)
+
+
 def test_worker_persistence_roundtrip(tmp_path):
     path = str(tmp_path / "store.db")
     s = Store(path=path)
