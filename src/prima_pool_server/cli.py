@@ -10,7 +10,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="prima-pool-server", description="prima-pool control plane")
     parser.add_argument("--host", default=None, help="Bind host (default: PRIMA_POOL_HOST or 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None, help="Bind port (default: PRIMA_POOL_PORT or 8000)")
-    parser.add_argument("--store", default=None, help="JSON store path (default: PRIMA_POOL_STORE_PATH)")
+    parser.add_argument("--store", default=None, help="SQLite DB path (default: PRIMA_POOL_STORE_PATH)")
     parser.add_argument("--reload", action="store_true", help="Enable uvicorn auto-reload (dev)")
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args()

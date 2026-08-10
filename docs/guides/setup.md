@@ -167,7 +167,24 @@ PRIMA_POOL_SERVER_WG_ENDPOINT_HOST=<your-public-ip>
 docker compose up -d
 ```
 
-### 2.4 Verify
+### 2.4 State & persistence
+
+All state (accounts, API keys, workers, clusters) is stored in a **SQLite
+database** — a single file that survives restarts:
+
+- **Default path**: `/data/store.db` inside the container, backed by a named
+  Docker volume (`prima-pool-server_prima-pool-server-data`). Nothing is erased
+  between startups.
+- **Config**: set `PRIMA_POOL_STORE_PATH` to use a custom path. If unset (bare
+  local run), the store is in-memory only — data is lost on restart.
+- **Legacy migration**: if you previously ran the old JSON-snapshot store
+  (`store.json`), it is **auto-migrated** into SQLite on first start. The JSON
+  file is kept (not deleted).
+- **Backup**: the DB is a single file — back it up by copying it, e.g.
+  `docker compose exec server cp /data/store.db /data/store.db.bak` (or back up
+  the Docker volume).
+
+### 2.5 Verify
 
 ```bash
 # OpenAPI docs

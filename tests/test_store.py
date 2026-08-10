@@ -1,8 +1,8 @@
-"""Store persistence round-trip tests.
+"""Store persistence tests.
 
-Verifies that the JSON store correctly serializes/deserializes Pydantic models
-(endpoint, hardware) and cluster state (ready set, ips dict) — these were
-previously corrupted to strings by json.dump(default=str).
+Verifies SQLite round-trips (endpoint/hardware, ready set, ips dict), legacy
+JSON migration (including FK ordering with worker→cluster refs), and that data
+is not erased between restarts.
 """
 from __future__ import annotations
 
@@ -20,11 +20,14 @@ from prima_pool_server.store import Store
 
 
 def test_worker_persistence_roundtrip(tmp_path):
-    path = str(tmp_path / "store.json")
+    path = str(tmp_path / "store.db")
     s = Store(path=path)
+    # The worker FK references an account; create it first.
+    acc = s.create_account("alice", "hunter2hunter2")
+    assert acc is not None
     rec = WorkerRecord(
         worker_id="wrk_1",
-        account_id="acc_1",
+        account_id=acc.account_id,
         model="demo-model",
         gguf_sha256="a" * 64,
         memory_allocated_mb=2048,
@@ -51,7 +54,7 @@ def test_worker_persistence_roundtrip(tmp_path):
 
 
 def test_cluster_persistence_roundtrip(tmp_path):
-    path = str(tmp_path / "store.json")
+    path = str(tmp_path / "store.db")
     s = Store(path=path)
     clu = ClusterRecord(
         cluster_id="clu_1",
@@ -86,3 +89,118 @@ def test_account_and_key_persistence(tmp_path):
     resolved = s2.resolve_api_key(secret)
     assert resolved is not None
     assert resolved.key_id == key.key_id
+
+
+def test_migrate_from_legacy_json(tmp_path):
+    """A legacy JSON snapshot is migrated into the SQLite DB on first open."""
+    import json
+
+    legacy = tmp_path / "store.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {"account_id": "acc_1", "username": "alice", "password_hash": "h", "created_at": 1.0}
+                ],
+                "api_keys": [],
+                "workers": [],
+                "clusters": [],
+            }
+        )
+    )
+    db = tmp_path / "store.db"
+    s = Store(path=str(db))
+    acc = s.get_account("acc_1")
+    assert acc is not None
+    assert acc.username == "alice"
+    assert acc.password_hash == "h"  # preserved verbatim from the snapshot
+    # The legacy JSON is not deleted by the migration.
+    assert legacy.exists()
+
+
+def test_migrate_worker_referencing_cluster(tmp_path):
+    """A migrated worker whose cluster_id references a cluster must survive.
+
+    Clusters are inserted BEFORE workers in the migration (FK ordering);
+    a worker pointing at a cluster must not be silently dropped.
+    """
+    import json
+
+    legacy = tmp_path / "store.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {"account_id": "acc_1", "username": "alice", "password_hash": "h", "created_at": 1.0}
+                ],
+                "api_keys": [],
+                "clusters": [
+                    {
+                        "cluster_id": "clu_1",
+                        "model": "demo-model",
+                        "subnet": "10.23.1.0/24",
+                        "status": "live",
+                        "members": ["w1"],
+                        "ready": ["w1"],
+                        "ips": {"w1": "10.23.1.1"},
+                        "created_at": 1.0,
+                    }
+                ],
+                "workers": [
+                    {
+                        "worker_id": "w1",
+                        "account_id": "acc_1",
+                        "model": "demo-model",
+                        "gguf_sha256": "a" * 64,
+                        "memory_allocated_mb": 4096,
+                        "status": "assigned",
+                        "online": True,
+                        "cluster_id": "clu_1",
+                        "assigned_ip": "10.23.1.1",
+                        "ring_position": 0,
+                        "last_heartbeat": 1.0,
+                        "assignable_at": 1.0,
+                        "created_at": 1.0,
+                        "wg_pubkey": "pk",
+                        "endpoint": {"host": "8.8.8.8", "port": 51820, "behind_nat": False, "nat_type": "unknown"},
+                        "hardware": None,
+                    }
+                ],
+            }
+        )
+    )
+    s = Store(path=str(tmp_path / "store.db"))
+    w = s.get_worker("w1")
+    assert w is not None, "worker referencing a cluster was dropped by migration"
+    assert w.cluster_id == "clu_1"
+    assert w.status.value == "assigned"
+    assert s.get_cluster("clu_1") is not None
+
+
+def test_restart_persists_data(tmp_path):
+    """Nothing is erased between startups: reopen the DB and data survives."""
+    db = str(tmp_path / "store.db")
+    s1 = Store(path=db)
+    acc = s1.create_account("alice", "hunter2hunter2")
+    assert acc is not None
+    key, _secret = s1.create_api_key(acc.account_id, "worker", "worker")
+    s1.close()
+
+    # "Restart": open again with the same path.
+    s2 = Store(path=db)
+    assert s2.get_account_by_username("alice") is not None
+    assert s2.get_api_key(key.key_id) is not None
+    s2.close()
+
+
+def test_legacy_json_path_redirects_to_db(tmp_path):
+    """A path ending in .json (old default) must open the .db sibling, not
+    treat the JSON as a SQLite DB."""
+    import json
+
+    legacy = tmp_path / "store.json"
+    legacy.write_text(json.dumps({"accounts": [], "api_keys": [], "workers": [], "clusters": []}))
+    s = Store(path=str(legacy))
+    assert s._path.endswith(".db")
+    assert os.path.exists(s._path)
+    s.close()

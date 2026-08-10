@@ -31,8 +31,8 @@ WORKDIR /app
 COPY --from=base /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=base /usr/local/bin/prima-pool-server /usr/local/bin/prima-pool-server
 
-# Optional JSON store path (mount a volume here to persist state).
-ENV PRIMA_POOL_STORE_PATH=/data/store.json
+# SQLite state database (mount a volume here to persist state).
+ENV PRIMA_POOL_STORE_PATH=/data/store.db
 VOLUME ["/data"]
 
 EXPOSE 8000

@@ -21,7 +21,19 @@
         <input type="password" id="login-password" placeholder="password" autocomplete="current-password" required>
         <button type="submit">Log in</button>
       </form>
+      <button type="button" id="show-register" class="switch-btn">Register a new account</button>
       <p class="hint">Uses the same session token as <code>POST /v1/accounts/login</code>.</p>
+    </section>
+
+    <section id="register" class="login" hidden>
+      <h2>Create an account</h2>
+      <form id="register-form">
+        <input type="text" id="register-username" placeholder="username" autocomplete="username" required>
+        <input type="password" id="register-password" placeholder="password (min 8 characters)" autocomplete="new-password" minlength="8" required>
+        <button type="submit">Register</button>
+      </form>
+      <button type="button" id="show-login" class="switch-btn">Back to log in</button>
+      <p class="hint">Register here first, then log in to get your session token.</p>
     </section>
 
     <section id="view" hidden>

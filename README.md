@@ -101,19 +101,23 @@ All settings are read from `PRIMA_POOL_*` environment variables. See
 | `PRIMA_POOL_PORT` | `8000` | Bind port |
 | `PRIMA_POOL_PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Base URL advertised in config URLs |
 | `PRIMA_POOL_SESSION_SECRET` | dev value | HMAC secret for session tokens (**change in prod**) |
+| `PRIMA_POOL_SESSION_TTL_S` | `3600` | Session token lifetime (seconds) |
 | `PRIMA_POOL_MODELS` | `demo-model:<no-hash>:4096` | Model registry `name:gguf_sha256:required_memory_mb[,..]` |
 | `PRIMA_POOL_HEARTBEAT_TIMEOUT_S` | `30` | Missed-heartbeat offline threshold |
 | `PRIMA_POOL_HEARTBEAT_INTERVAL_S` | `10` | Suggested heartbeat cadence |
 | `PRIMA_POOL_ASSIGNABLE_GRACE_S` | `5` | Grace period before a re-added worker is assignable |
 | `PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT` | `5` | Worker cap per account |
 | `PRIMA_POOL_WG_MTU` | `1280` | WireGuard MTU |
-| `PRIMA_POOL_RELAY_ENABLED` | `false` | Relay support (v0: config only) |
-| `PRIMA_POOL_STORE_PATH` | unset | JSON persistence path (in-memory if unset) |
+| `PRIMA_POOL_RELAY_ENABLED` | `false` | Relay fallback enabled (see setup guide Part 6) |
+| `PRIMA_POOL_RELAY_PUBKEY` | — | Relay's WireGuard public key |
+| `PRIMA_POOL_RELAY_ENDPOINT` | — | Relay's reachable endpoint `host:port` |
+| `PRIMA_POOL_STORE_PATH` | unset | SQLite DB path (in-memory if unset). Legacy JSON snapshots are auto-migrated on first open |
 | `PRIMA_POOL_API_PORT` | `8080` | Head's llama-server port (proxied) |
 | `PRIMA_POOL_SERVER_JOIN_WG` | `false` | Server joins cluster WG networks (proxy) |
 | `PRIMA_POOL_SERVER_WG_PRIVATE_KEY` | auto | Server WG private key (auto-generated) |
 | `PRIMA_POOL_SERVER_WG_LISTEN_PORT` | `51821` | Server WG listen port |
 | `PRIMA_POOL_SERVER_WG_INTERFACE` | `prima-pool-srv` | Server WG interface prefix |
+| `PRIMA_POOL_SERVER_WG_CONF_DIR` | `/etc/wireguard` | Where server WG configs are written |
 | `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST` | — | Public IP advertised as server WG endpoint |
 | `PRIMA_POOL_SERVER_WG_IP_OFFSET` | `254` | Server's IP offset in each cluster subnet |
 
@@ -136,7 +140,7 @@ src/prima_pool_server/
 ├── router.py     # Cluster router (find live head for proxy)
 ├── scheduler.py  # Cluster formation / dissolution
 ├── security.py   # Password hashing, tokens, key generation
-├── store.py      # In-memory store with optional JSON persistence
+├── store.py      # SQLite-backed store (accounts/key/workers/clusters)
 ├── wg_server.py  # Server-side WireGuard (join clusters)
 └── ws_hub.py     # WebSocket push hub
 ```

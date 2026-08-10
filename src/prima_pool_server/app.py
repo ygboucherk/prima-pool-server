@@ -357,8 +357,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             w.assignable_at = time.time() + settings.assignable_grace_s
             if w.status == WorkerStatus.registered:
                 w.status = WorkerStatus.waitlisted
-            scheduler.check_and_form()
+        # Persist BEFORE the scheduler reads (SQLite reads from disk; the
+        # scheduler must see online=True / assignable_at already written).
         store.update_worker(w)
+        if was_offline:
+            scheduler.check_and_form()
         return w.to_worker()
 
     # ── clusters ─────────────────────────────────────────────────────────

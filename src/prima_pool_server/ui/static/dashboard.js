@@ -93,12 +93,54 @@
     }
   }
 
+  async function register(username, password) {
+    await api('/v1/accounts/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    // Account created. For now, return to the login form (auto-login later).
+    $('register').hidden = true;
+    $('login').hidden = false;
+    $('login-username').value = username;
+    $('login-password').value = '';
+    $('login-password').focus();
+    setStatus('account created — log in to continue', 'ok');
+  }
+
+  function show(view) {
+    $('login').hidden = view !== 'login';
+    $('register').hidden = view !== 'register';
+  }
+
+  $('show-register').addEventListener('click', () => {
+    setStatus('');
+    show('register');
+    $('register-username').focus();
+  });
+
+  $('show-login').addEventListener('click', () => {
+    setStatus('');
+    show('login');
+    $('login-username').focus();
+  });
+
   $('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const username = $('login-username').value.trim();
     const password = $('login-password').value;
     try {
       await login(username, password);
+    } catch (err) {
+      setStatus(err.message, 'err');
+    }
+  });
+
+  $('register-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = $('register-username').value.trim();
+    const password = $('register-password').value;
+    try {
+      await register(username, password);
     } catch (err) {
       setStatus(err.message, 'err');
     }

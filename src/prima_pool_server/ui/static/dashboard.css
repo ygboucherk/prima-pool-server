@@ -53,6 +53,16 @@ header .subtitle { color: #8b93a7; }
   cursor: pointer;
   font-weight: 600;
 }
+.login .switch-btn {
+  background: none;
+  border: none;
+  color: #8b93a7;
+  padding: 8px 0 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+}
+.login .switch-btn:hover { color: #aab4c8; text-decoration: underline; }
 .login .hint { color: #667088; font-size: 0.8rem; margin-top: 10px; }
 .login .hint code { color: #aab4c8; }
 
