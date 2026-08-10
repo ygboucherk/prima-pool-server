@@ -56,6 +56,47 @@ def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
+def _client_ip(request: Request) -> str:
+    """Return the client's IP as seen by the server (handles proxies)."""
+    # Respect X-Forwarded-For when behind a reverse proxy (first hop = client).
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    if request.client:
+        return request.client.host
+    return ""
+
+
+def _is_usable_endpoint_host(host: str) -> bool:
+    """True if a host is a plausible externally-reachable WG endpoint.
+
+    Rejects empty, loopback, and RFC1918 private/container addresses — those
+    are meaningless to other peers (e.g. a container's 172.17.x.x).
+
+    Note: Tailscale uses the CGNAT range 100.64.0.0/10, which Python's
+    `ipaddress.is_private` flags as private. Those are routable VPN addresses,
+    so we explicitly allow them (a common deployment pattern).
+    """
+    import ipaddress
+
+    host = host.strip()
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname (e.g. a domain or Tailscale magicDNS name) — assume usable.
+        return True
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        return False
+    # RFC1918 private LAN / Docker bridge ranges are unusable by peers.
+    if ip.is_private and ip not in ipaddress.ip_network("100.64.0.0/10"):
+        return False
+    return True
+
+
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
     settings = settings or Settings()
     store = store or Store(settings_path_from_env())
@@ -216,7 +257,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     # ── workers ──────────────────────────────────────────────────────────
     @app.post("/v1/workers/register", response_model=Worker, status_code=201)
-    async def register_worker(body: RegisterWorkerRequest, authorization: str | None = Header(None)):
+    async def register_worker(
+        request: Request,
+        body: RegisterWorkerRequest,
+        authorization: str | None = Header(None),
+    ):
         account_id, scope = _api_key(authorization)
         if scope != "worker":
             raise ForbiddenError("A user key cannot register workers.")
@@ -244,6 +289,24 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 f"{model_def.gguf_sha256[:12]}…)."
             )
 
+        # WG endpoint: prefer the client's self-reported (reachable) host, else
+        # fall back to the IP the server observes on the registration connection.
+        # This closes the "container IP advertised as endpoint" gap: a provider
+        # behind a container (or any private IP) gets its public source IP used
+        # as the WG endpoint host automatically.
+        endpoint = body.endpoint
+        if not _is_usable_endpoint_host(endpoint.host):
+            observed = _client_ip(request)
+            if observed:
+                logger.info(
+                    "worker '%s' advertised unusable endpoint host %r; using "
+                    "observed source IP %s",
+                    body.model,
+                    endpoint.host,
+                    observed,
+                )
+                endpoint.host = observed
+
         rec = WorkerRecord(
             worker_id=new_id("wrk"),
             account_id=account_id,
@@ -251,7 +314,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             gguf_sha256=body.gguf_sha256,
             memory_allocated_mb=body.memory_allocated_mb,
             wg_pubkey=body.wg_pubkey,
-            endpoint=body.endpoint,
+            endpoint=endpoint,
             hardware=body.hardware,
             status=WorkerStatus.waitlisted,
             online=False,

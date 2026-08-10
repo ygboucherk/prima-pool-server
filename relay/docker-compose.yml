@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────
+# prima-pool relay — WireGuard forwarding node
+# ─────────────────────────────────────────────────────────────
+# Run by the POOL OPERATOR on a publicly reachable host. Provides
+# relay fallback for cluster members behind symmetric NAT / CGNAT.
+#
+#   cp .env.example .env
+#   docker compose up -d
+#   docker logs prima-pool-relay   # get the PUBLIC KEY
+#   # set PRIMA_POOL_RELAY_* on the pool server
+# ─────────────────────────────────────────────────────────────
+name: prima-pool-relay
+
+services:
+  relay:
+    build: .
+    image: prima-pool-relay:local
+    container_name: prima-pool-relay
+    restart: unless-stopped
+    environment:
+      # Static peers: "pubkey=allowedips[,pubkey=allowedips...]"
+      RELAY_PEERS: ${RELAY_PEERS:-}
+      # Peers file (mounted, hot-reloaded): "pubkey allowedips" per line.
+      RELAY_PEERS_FILE: /etc/wireguard/relay-peers
+      WG_LISTEN_PORT: ${WG_LISTEN_PORT:-51822}
+      WG_ADDRESS: ${WG_ADDRESS:-10.23.255.254/24}
+      WG_INTERFACE: ${WG_INTERFACE:-prima-relay}
+      # Set a fixed private key to keep the pubkey stable across restarts.
+      WG_PRIVATE_KEY: ${WG_PRIVATE_KEY:-}
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "${WG_LISTEN_PORT:-51822}:51822/udp"
+    volumes:
+      # Optional: mount a peers file the operator (or a script) updates.
+      # Each line: "pubkey allowedips" (allowedips optional, defaults to 0.0.0.0/0).
+      - ${RELAY_PEERS_FILE_HOST:-./relay-peers}:/etc/wireguard/relay-peers

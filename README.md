@@ -4,6 +4,9 @@ A control plane for an AI inference pool based on prima.cpp. This is a **working
 implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 `docs/openapi/prima-pool.yaml`.
 
+> **New to prima-pool?** Follow the [setup guide](docs/guides/setup.md) to get a
+> fully working pool (WireGuard install + server + providers).
+
 ## What it does
 
 - **Accounts** — register/login, scoped API keys (`worker` / `user`)
