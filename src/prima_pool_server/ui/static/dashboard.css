@@ -116,3 +116,45 @@ td { color: #d6dbe6; }
 .badge.offline { background: #3a1c1c; color: #ff8585; }
 
 .empty { color: #667088; font-style: italic; padding: 12px 0; }
+
+.key-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.key-form input,
+.key-form select {
+  background: #10151f;
+  border: 1px solid #273049;
+  color: #e6e9f0;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.key-form input { flex: 1; }
+.key-form button {
+  background: #2f6fed;
+  color: #fff;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.key-created {
+  background: #1c3a2a;
+  border: 1px solid #2f6f4a;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  color: #5fd489;
+}
+.key-created code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px;
+  background: #10151f;
+  border-radius: 6px;
+  color: #e6e9f0;
+  word-break: break-all;
+}

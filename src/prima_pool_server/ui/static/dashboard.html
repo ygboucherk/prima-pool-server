@@ -54,6 +54,18 @@
 
       <section>
         <h2>API keys</h2>
+        <form id="create-key-form" class="key-form">
+          <input type="text" id="key-name" placeholder="name (e.g. device-1)" required>
+          <select id="key-scope">
+            <option value="worker">worker</option>
+            <option value="user">user</option>
+          </select>
+          <button type="submit">Create key</button>
+        </form>
+        <div id="key-created" class="key-created" hidden>
+          <strong>Key created — copy it now, it won't be shown again:</strong>
+          <code id="key-secret"></code>
+        </div>
         <table>
           <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
           <tbody id="keys-body"></tbody>

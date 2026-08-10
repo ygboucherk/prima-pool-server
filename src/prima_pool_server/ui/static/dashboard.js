@@ -107,6 +107,17 @@
     setStatus('account created — log in to continue', 'ok');
   }
 
+  async function createKey(name, scope) {
+    const key = await api('/v1/accounts/' + accountId + '/keys', {
+      method: 'POST',
+      body: JSON.stringify({ name, scope }),
+    });
+    // Show the plaintext secret once (the server only returns it on creation).
+    $('key-secret').textContent = key.api_key;
+    $('key-created').hidden = false;
+    await refresh();
+  }
+
   function show(view) {
     $('login').hidden = view !== 'login';
     $('register').hidden = view !== 'register';
@@ -141,6 +152,19 @@
     const password = $('register-password').value;
     try {
       await register(username, password);
+    } catch (err) {
+      setStatus(err.message, 'err');
+    }
+  });
+
+  $('create-key-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = $('key-name').value.trim();
+    const scope = $('key-scope').value;
+    try {
+      await createKey(name, scope);
+      $('key-name').value = '';
+      setStatus('key created', 'ok');
     } catch (err) {
       setStatus(err.message, 'err');
     }
