@@ -65,6 +65,9 @@
     return resp.json();
   }
 
+  // The dashboard data is fetched once and shared by all tabs.
+  let overview = null;
+
   async function login(username, password) {
     const session = await api('/v1/accounts/login', {
       method: 'POST',
@@ -97,15 +100,35 @@
     if (!sessionToken || !accountId) return;
     try {
       const data = await api('/v1/accounts/' + accountId + '/dashboard');
+      overview = data;
       $('stat-account').textContent = data.username || data.account_id;
       $('stat-workers').textContent = data.workers.length;
       $('stat-online').textContent = data.workers.filter((w) => w.online).length;
       $('stat-keys').textContent = data.keys.length;
       renderWorkers(data.workers);
       renderKeys(data.keys);
+      refreshUsageTab();
       setStatus('connected', 'ok');
     } catch (e) {
       handleApiError(e);
+    }
+  }
+
+  // Render the inference usage tab. There is no server endpoint for usage
+  // yet, so we show the user-scoped keys as a placeholder summary.
+  function refreshUsageTab() {
+    if (!overview) return;
+    const userKeys = overview.keys.filter((k) => k.scope === 'user');
+    const tbody = $('usage-body');
+    tbody.innerHTML = '';
+    if (!userKeys.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="empty">No user keys yet — inference usage will appear here once the server exposes a usage endpoint.</td></tr>';
+      return;
+    }
+    for (const k of userKeys) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><code>${k.key_id}</code></td><td>${k.name}</td><td><span class="badge ${k.scope}">no usage recorded</span></td>`;
+      tbody.appendChild(tr);
     }
   }
 
@@ -130,17 +153,32 @@
     }
   }
 
-  function renderKeys(keys) {
+  // Render the API keys table filtered by scope: worker keys here, user keys
+  // under the inference usage tab.
+  function renderKeys(keys, scope = null) {
     const tbody = $('keys-body');
     tbody.innerHTML = '';
-    if (!keys.length) {
-      tbody.innerHTML = '<tr><td colspan="3" class="empty">No API keys</td></tr>';
+    const list = scope ? keys.filter((k) => k.scope === scope) : keys;
+    if (!list.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">No keys yet</td></tr>';
       return;
     }
-    for (const k of keys) {
+    for (const k of list) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><code>${k.key_id}</code></td><td>${k.name}</td><td><span class="badge ${k.scope}">${k.scope}</span></td>`;
+      tr.innerHTML = `<td><code>${k.key_id}</code></td><td>${k.name}</td><td><span class="badge ${k.scope}">${k.scope}</span></td><td><button type="button" class="revoke-btn" data-key="${k.key_id}" data-name="${k.name}">revoke</button></td>`;
+      tr.querySelector('.revoke-btn').addEventListener('click', () => revokeKey(k.key_id, k.name));
       tbody.appendChild(tr);
+    }
+  }
+
+  async function revokeKey(keyId, name) {
+    if (!window.confirm('Revoke API key ' + name + '? This cannot be undone.')) return;
+    try {
+      await api('/v1/accounts/' + accountId + '/keys/' + keyId, { method: 'DELETE' });
+      setStatus('key revoked', 'ok');
+      await refresh();
+    } catch (err) {
+      handleApiError(err);
     }
   }
 
@@ -169,10 +207,28 @@
     await refresh();
   }
 
-  function show(view) {
+  function showAuth(view) {
     $('login').hidden = view !== 'login';
     $('register').hidden = view !== 'register';
   }
+
+  // ── tabs ─────────────────────────────────────────────────────────────
+  function activateTab(name) {
+    document.querySelectorAll('.tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tab === name);
+    });
+    for (const id of ['overview', 'usage', 'workers', 'keys']) {
+      $('tab-' + id).hidden = id !== name;
+    }
+    if (name === 'keys') renderKeys(overview ? overview.keys : []);
+    if (name === 'usage') refreshUsageTab();
+  }
+
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+  });
+
+  function show(view) { showAuth(view); }
 
   $('show-register').addEventListener('click', () => {
     setStatus('');
@@ -236,6 +292,7 @@
     $('login').hidden = true;
     $('view').hidden = false;
     $('logout-btn').hidden = false;
+    activateTab('overview');
     setStatus('connected', 'ok');
     refresh();
   } else {

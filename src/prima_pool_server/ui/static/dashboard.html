@@ -38,40 +38,65 @@
     </section>
 
     <section id="view" hidden>
-      <div class="cards">
-        <div class="card"><div class="value" id="stat-account">—</div><div class="label">Account</div></div>
-        <div class="card"><div class="value" id="stat-workers">—</div><div class="label">Workers</div></div>
-        <div class="card"><div class="value" id="stat-online">—</div><div class="label">Online</div></div>
-        <div class="card"><div class="value" id="stat-keys">—</div><div class="label">API keys</div></div>
-      </div>
+      <aside class="sidebar">
+        <nav>
+          <button type="button" class="tab-btn" data-tab="overview">Overview</button>
+          <button type="button" class="tab-btn" data-tab="usage">Inference usage</button>
+          <button type="button" class="tab-btn" data-tab="workers">Workers</button>
+          <button type="button" class="tab-btn" data-tab="keys">API keys</button>
+        </nav>
+      </aside>
 
-      <section>
-        <h2>Workers</h2>
-        <table>
-          <thead><tr><th>Worker</th><th>Model</th><th>Status</th><th>Online</th><th>Memory</th><th>Cluster</th></tr></thead>
-          <tbody id="workers-body"></tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>API keys</h2>
-        <form id="create-key-form" class="key-form">
-          <input type="text" id="key-name" placeholder="name (e.g. device-1)" required>
-          <select id="key-scope">
-            <option value="worker">worker</option>
-            <option value="user">user</option>
-          </select>
-          <button type="submit">Create key</button>
-        </form>
-        <div id="key-created" class="key-created" hidden>
-          <strong>Key created — copy it now, it won't be shown again:</strong>
-          <code id="key-secret"></code>
+      <div class="content">
+        <div class="cards">
+          <div class="card"><div class="value" id="stat-account">—</div><div class="label">Account</div></div>
+          <div class="card"><div class="value" id="stat-workers">—</div><div class="label">Workers</div></div>
+          <div class="card"><div class="value" id="stat-online">—</div><div class="label">Online</div></div>
+          <div class="card"><div class="value" id="stat-keys">—</div><div class="label">API keys</div></div>
         </div>
-        <table>
-          <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
-          <tbody id="keys-body"></tbody>
-        </table>
-      </section>
+
+        <section id="tab-overview">
+          <h2>Overview</h2>
+          <p class="hint">Your account's workers and API keys. Use the sidebar to drill into each section.</p>
+        </section>
+
+        <section id="tab-usage" hidden>
+          <h2>Inference usage</h2>
+          <p class="hint">Token consumption for user keys will appear here once the server exposes a usage endpoint (design-only in v0 — see <code>docs/protocol/usage-and-accounting.md</code>).</p>
+          <table>
+            <thead><tr><th>Key</th><th>Name</th><th>Status</th></tr></thead>
+            <tbody id="usage-body"><tr><td colspan="3" class="empty">No usage reported yet</td></tr></tbody>
+          </table>
+        </section>
+
+        <section id="tab-workers" hidden>
+          <h2>Workers</h2>
+          <table>
+            <thead><tr><th>Worker</th><th>Model</th><th>Status</th><th>Online</th><th>Memory</th><th>Cluster</th></tr></thead>
+            <tbody id="workers-body"></tbody>
+          </table>
+        </section>
+
+        <section id="tab-keys" hidden>
+          <h2>API keys</h2>
+          <form id="create-key-form" class="key-form">
+            <input type="text" id="key-name" placeholder="name (e.g. device-1)" required>
+            <select id="key-scope">
+              <option value="worker">worker</option>
+              <option value="user">user</option>
+            </select>
+            <button type="submit">Create key</button>
+          </form>
+          <div id="key-created" class="key-created" hidden>
+            <strong>Key created — copy it now, it won't be shown again:</strong>
+            <code id="key-secret"></code>
+          </div>
+          <table>
+            <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
+            <tbody id="keys-body"></tbody>
+          </table>
+        </section>
+      </div>
     </section>
   </main>
 

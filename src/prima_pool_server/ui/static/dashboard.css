@@ -169,3 +169,45 @@ td { color: #d6dbe6; }
   color: #e6e9f0;
   word-break: break-all;
 }
+
+/* ── sidebar layout ─────────────────────────────────────────────────── */
+#view {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+/* Keep the `hidden` attribute working (overrides #view's display: flex). */
+#view[hidden] { display: none; }
+.sidebar {
+  flex: 0 0 180px;
+  background: #1a2130;
+  border: 1px solid #273049;
+  border-radius: 10px;
+  padding: 8px;
+}
+.sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+.tab-btn {
+  background: none;
+  border: none;
+  color: #8b93a7;
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.tab-btn:hover { color: #e6e9f0; background: #232c40; }
+.tab-btn.active { color: #fff; background: #2f6fed; font-weight: 600; }
+
+.content { flex: 1; min-width: 0; }
+.content h2 { margin-bottom: 8px; }
+.content .hint { color: #667088; font-size: 0.85rem; margin: 0 0 16px; }
+.content .hint code { color: #aab4c8; }
+
+/* Login/register forms stack full-width (outside the sidebar layout). */
+
+@media (max-width: 720px) {
+  #view { flex-direction: column; }
+  .sidebar { flex: none; width: 100%; }
+  .sidebar nav { flex-direction: row; flex-wrap: wrap; }
+}
