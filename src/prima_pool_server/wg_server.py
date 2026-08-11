@@ -16,6 +16,7 @@ performed when `server_join_wg` is enabled.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -140,8 +141,22 @@ class ServerWireGuard:
 
         return "\n".join(lines)
 
+    def _iface(self, cluster_id: str) -> str:
+        """A short, deterministic WG interface name for a cluster.
+
+        Linux interface names are limited to 15 chars (IFNAMSIZ). Embedding the
+        full cluster_id (e.g. `prima-pool-srv-clu_...`) exceeds that and makes
+        `wg-quick up` fail. We hash the cluster_id and keep the base prefix
+        short so the result always fits.
+        """
+        base = self.settings.server_wg_interface
+        # Trim the base to leave room for a separator + 8 hex chars.
+        base = base[:6].rstrip("-")
+        digest = hashlib.sha256(cluster_id.encode()).hexdigest()[:8]
+        return f"{base}-{digest}"
+
     def conf_path(self, cluster_id: str) -> Path:
-        return Path(self.settings.server_wg_conf_dir) / f"{self.settings.server_wg_interface}-{cluster_id}.conf"
+        return Path(self.settings.server_wg_conf_dir) / f"{self._iface(cluster_id)}.conf"
 
     def up(self, cluster: ClusterRecord, members: list) -> None:
         """Bring up the server's WG interface for a cluster (if enabled)."""
@@ -155,13 +170,13 @@ class ServerWireGuard:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(conf)
         path.chmod(0o600)
-        iface = f"{self.settings.server_wg_interface}-{cluster.cluster_id}"
+        iface = self._iface(cluster.cluster_id)
         subprocess.run([self._wg_quick, "up", iface], check=True, capture_output=True, text=True)
         logger.info("server joined cluster %s via %s", cluster.cluster_id, iface)
 
     def down(self, cluster_id: str) -> None:
         if not self.enabled:
             return
-        iface = f"{self.settings.server_wg_interface}-{cluster_id}"
+        iface = self._iface(cluster_id)
         subprocess.run([self._wg_quick, "down", iface], capture_output=True, text=True)
         logger.info("server left cluster %s", cluster_id)

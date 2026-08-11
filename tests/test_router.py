@@ -43,6 +43,19 @@ def test_server_peer_has_role_marker():
     assert peer["endpoint"] == "203.0.113.99:51821"
 
 
+def test_server_iface_name_fits_linux_limit():
+    """Linux interface names are capped at 15 chars (IFNAMSIZ). Embedding the
+    full cluster_id (e.g. `prima-pool-srv-clu_...`) exceeds that and makes
+    `wg-quick up` fail with exit status 1. The hashed name must always fit."""
+    wg = ServerWireGuard(_settings())
+    for cid in ("clu_1", "clu_ad80634dac4a5d8e", "clu_4251bf2bbca322ac"):
+        iface = wg._iface(cid)
+        assert len(iface) <= 15, f"{iface} too long ({len(iface)})"
+        assert iface == wg._iface(cid)  # deterministic
+    # Distinct clusters get distinct interface names.
+    assert wg._iface("clu_1") != wg._iface("clu_2")
+
+
 def test_router_finds_live_cluster_head():
     store = Store(path=None)
     store.create_cluster(
