@@ -39,7 +39,15 @@ class LivenessMonitor:
         interval = max(1.0, self.settings.heartbeat_timeout_s / 3)
         while True:
             await asyncio.sleep(interval)
-            self._check()
+            try:
+                self._check()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # A transient error (e.g. a store/WG/hub hiccup while dissolving
+                # a cluster) must NOT kill the monitor — otherwise workers would
+                # stay marked online forever. Log and keep sweeping.
+                logger.exception("liveness check failed: %s", exc)
 
     def _check(self) -> None:
         now = time.time()
@@ -49,6 +57,11 @@ class LivenessMonitor:
                 continue
             if now - w.last_heartbeat > timeout:
                 logger.info("worker %s offline (no heartbeat)", w.worker_id)
-                w.online = False
-                self.store.update_worker(w)
-                self.scheduler.on_worker_offline(w)
+                try:
+                    w.online = False
+                    self.store.update_worker(w)
+                    self.scheduler.on_worker_offline(w)
+                except Exception as exc:  # noqa: BLE001
+                    # Don't let one worker's teardown failure abort the sweep
+                    # for the rest.
+                    logger.exception("failed to mark worker %s offline: %s", w.worker_id, exc)
