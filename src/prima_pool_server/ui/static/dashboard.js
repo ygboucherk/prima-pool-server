@@ -4,8 +4,42 @@
 (function () {
   const statusEl = document.getElementById('connection-status');
   const $ = (id) => document.getElementById(id);
+  const TOKEN_KEY = 'prima-pool.session-token';
+  const ACCOUNT_KEY = 'prima-pool.account-id';
   let sessionToken = null;
   let accountId = null;
+
+  // Persist the session in sessionStorage so a page refresh keeps the user
+  // logged in for the lifetime of the tab. The token is never placed in the
+  // URL or in localStorage (which would survive tab close).
+  function saveSession() {
+    try {
+      sessionStorage.setItem(TOKEN_KEY, sessionToken);
+      sessionStorage.setItem(ACCOUNT_KEY, accountId);
+    } catch (e) { /* storage unavailable — session stays in-memory only */ }
+  }
+
+  function restoreSession() {
+    try {
+      const t = sessionStorage.getItem(TOKEN_KEY);
+      const a = sessionStorage.getItem(ACCOUNT_KEY);
+      if (t && a) {
+        sessionToken = t;
+        accountId = a;
+        return true;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  function clearSession() {
+    sessionToken = null;
+    accountId = null;
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(ACCOUNT_KEY);
+    } catch (e) { /* ignore */ }
+  }
 
   function setStatus(text, cls) {
     statusEl.textContent = text;
@@ -24,7 +58,9 @@
         if (j.detail) detail = j.detail;
         else if (j.title) detail = j.title;
       } catch (e) { /* ignore */ }
-      throw new Error(detail);
+      const err = new Error(detail);
+      err.status = resp.status;
+      throw err;
     }
     return resp.json();
   }
@@ -37,10 +73,24 @@
     sessionToken = session.session_token;
     // The session token body embeds the account_id (after the "sess_" prefix).
     accountId = session.session_token.split('.')[0].replace(/^sess_/, '');
+    saveSession();
     setStatus('connected', 'ok');
     $('login').hidden = true;
     $('view').hidden = false;
+    $('logout-btn').hidden = false;
     await refresh();
+  }
+
+  // Central error handler: a 401 means the loaded session is invalid or
+  // expired, so drop it and return to the login form.
+  function handleApiError(err) {
+    setStatus('error: ' + err.message, 'err');
+    if (err.status === 401) {
+      clearSession();
+      $('view').hidden = true;
+      $('logout-btn').hidden = true;
+      show('login');
+    }
   }
 
   async function refresh() {
@@ -53,8 +103,9 @@
       $('stat-keys').textContent = data.keys.length;
       renderWorkers(data.workers);
       renderKeys(data.keys);
+      setStatus('connected', 'ok');
     } catch (e) {
-      setStatus('error: ' + e.message, 'err');
+      handleApiError(e);
     }
   }
 
@@ -142,7 +193,7 @@
     try {
       await login(username, password);
     } catch (err) {
-      setStatus(err.message, 'err');
+      handleApiError(err);
     }
   });
 
@@ -153,7 +204,7 @@
     try {
       await register(username, password);
     } catch (err) {
-      setStatus(err.message, 'err');
+      handleApiError(err);
     }
   });
 
@@ -166,9 +217,29 @@
       $('key-name').value = '';
       setStatus('key created', 'ok');
     } catch (err) {
-      setStatus(err.message, 'err');
+      handleApiError(err);
     }
   });
 
-  setStatus('logged out');
+  $('logout-btn').addEventListener('click', () => {
+    clearSession();
+    $('view').hidden = true;
+    $('logout-btn').hidden = true;
+    $('login-password').value = '';
+    show('login');
+    $('login-username').focus();
+    setStatus('logged out');
+  });
+
+  // Restore a persisted session (if any) so a refresh keeps the user logged in.
+  if (restoreSession()) {
+    $('login').hidden = true;
+    $('view').hidden = false;
+    $('logout-btn').hidden = false;
+    setStatus('connected', 'ok');
+    refresh();
+  } else {
+    $('logout-btn').hidden = true;
+    setStatus('logged out');
+  }
 })();

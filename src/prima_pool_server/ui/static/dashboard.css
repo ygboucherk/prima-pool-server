@@ -24,6 +24,17 @@ header .subtitle { color: #8b93a7; }
   background: #2a3245;
   color: #aab4c8;
 }
+
+.logout-btn {
+  font-size: 0.85rem;
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 1px solid #273049;
+  background: none;
+  color: #aab4c8;
+  cursor: pointer;
+}
+.logout-btn:hover { border-color: #3a4459; color: #e6e9f0; }
 .status.ok { background: #1c3a2a; color: #5fd489; }
 .status.err { background: #3a1c1c; color: #ff8585; }
 
