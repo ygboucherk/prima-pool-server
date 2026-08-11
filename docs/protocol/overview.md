@@ -42,7 +42,8 @@ authenticated, negotiated peers.
 | Per-model waitlists, cluster formation                    | Signed/verifiable usage reports                      |
 | Cluster assignment (WS push) + config retrieval           | Payment / billing                                   |
 | WireGuard tunnel bring-up (direct-first, relay fallback)  | Model registry management (admin)                    |
-| Readiness handshake, heartbeat, liveness                  | Multiple workers (models) per device                 |
+| Readiness handshake, heartbeat, liveness                  |                                                      |
+| Multiple workers per account (one device == one worker)   |                                                      |
 | Offline workers: removed from waitlist, re-added on return |                                                     |
 | Worker-initiated leave                                    |                                                     |
 | **Inference proxy** (`POST /v1/chat/completions` → head)  |                                                     |

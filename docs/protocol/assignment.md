@@ -43,6 +43,12 @@ the target `worker_id` **or** the owning account's session token (dual-auth). A 
 access another account's worker, its state, heartbeat, cluster config, or events. User-scoped API
 keys are rejected.
 
+Because one account may run several workers (same or different models), each worker-scoped key is
+**bound to the worker it registered**. Cluster-scoped calls (`/config`, `/ready`) use the bound
+worker to identify the caller precisely — so readiness and config are attributed to the correct
+device even when multiple workers of one account are in the same cluster. If a key is unbound
+(e.g. issued before this feature), the worker's heartbeat binds it automatically.
+
 ### Cluster dissolution
 
 Because prima.cpp shards a model across nodes and **every node must hold a copy of the model

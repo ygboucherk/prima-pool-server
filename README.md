@@ -11,7 +11,10 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 
 - **Accounts** — register/login, scoped API keys (`worker` / `user`)
 - **Workers** — device registration, per-model waitlists, heartbeat-driven liveness;
-  worker endpoints accept EITHER the worker key OR the owning account's session token
+  worker endpoints accept EITHER the worker key OR the owning account's session token.
+  One account may run **multiple workers** (e.g. the same model on several machines);
+  each worker-scoped key is bound to the worker it registered, so cluster readiness
+  and config are attributed to the correct device even within one account.
 - **Clusters** — forms a prima.cpp ring when a model's waitlist has enough memory,
   hands out WireGuard configs (ring order = peer order), readiness handshake
 - **Model integrity** — the registry pins each model to an exact GGUF SHA-256;
@@ -77,7 +80,13 @@ When enabled, the server:
 - generates its own WireGuard keypair and gets a private IP in each cluster
   subnet (default `.254`),
 - is added as a peer in every member's config (marked `role: "server"`),
-- brings up a `prima-pool-srv-<cluster>` interface per cluster.
+- brings up a per-cluster WG interface. The interface name is a short hash of
+  the cluster id (e.g. `prima-88255830`) — Linux caps interface names at 15
+  chars, so the full cluster id is never embedded in the name.
+
+The server image must include `wireguard-tools` (it does, since the Dockerfile
+installs `wireguard-tools iproute2`); without them the join fails with
+`wg-quick/wg not found` and the proxy returns 502.
 
 A user with a `sk-user-...` key can then call:
 
@@ -116,7 +125,7 @@ All settings are read from `PRIMA_POOL_*` environment variables. See
 | `PRIMA_POOL_SERVER_JOIN_WG` | `false` | Server joins cluster WG networks (proxy) |
 | `PRIMA_POOL_SERVER_WG_PRIVATE_KEY` | auto | Server WG private key (auto-generated) |
 | `PRIMA_POOL_SERVER_WG_LISTEN_PORT` | `51821` | Server WG listen port |
-| `PRIMA_POOL_SERVER_WG_INTERFACE` | `prima-pool-srv` | Server WG interface prefix |
+| `PRIMA_POOL_SERVER_WG_INTERFACE` | `prima-pool-srv` | Server WG interface prefix (trimmed + hashed per cluster to fit the 15-char Linux limit) |
 | `PRIMA_POOL_SERVER_WG_CONF_DIR` | `/etc/wireguard` | Where server WG configs are written |
 | `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST` | — | Public IP advertised as server WG endpoint |
 | `PRIMA_POOL_SERVER_WG_IP_OFFSET` | `254` | Server's IP offset in each cluster subnet |

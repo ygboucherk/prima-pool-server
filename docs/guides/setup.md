@@ -310,6 +310,7 @@ Streaming is supported (`"stream": true` → SSE).
 | `400 ... does not match` at registration | Wrong GGUF hash | Use the exact model file the registry pins |
 | WG interface won't come up | No `/dev/net/tun` or kernel module | See Part 1 |
 | Peers can't reach each other | Endpoint is a container IP / NAT | Set `PRIMA_POOL_WG_ENDPOINT_HOST` to a reachable IP (or rely on the server's observed source IP). For hard NAT, deploy a relay (Part 6) |
+| `502 Upstream Error` on `/v1/chat/completions` | Server can't reach the head over WG | Ensure `PRIMA_POOL_SERVER_JOIN_WG=true` + `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST` set, the server image has `wireguard-tools`, and the server joined the cluster (check server logs for `server joined cluster`) |
 | `no service selected` (client) | `COMPOSE_PROFILES` missing | Not applicable — client uses `same-container` mode |
 
 ---

@@ -65,12 +65,14 @@ cluster's WireGuard network so it can proxy inference requests to the head (rank
   `.254`).
 - The server is added as a peer in every member's config with `role: "server"` — it is **not** a
   ring member; clients exclude it from ring topology.
-- The server brings up a `prima-pool-srv-<cluster>` interface per cluster and tears it down on
-  dissolution.
+- The server brings up a per-cluster WG interface. Because Linux caps interface names at 15
+  chars (`IFNAMSIZ`), the name is a short hash of the cluster id (e.g. `prima-88255830`), not
+  the full cluster id. It is torn down on dissolution.
 
 The server then serves `POST /v1/chat/completions` (auth: user-scoped key), proxying the request
-over the tunnel to the head. This requires `NET_ADMIN` + `/dev/net/tun` on the server and a
-publicly reachable `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST`.
+over the tunnel to the head. This requires `NET_ADMIN` + `/dev/net/tun` on the server, the
+`wireguard-tools` package in the server image, and a publicly reachable
+`PRIMA_POOL_SERVER_WG_ENDPOINT_HOST`.
 
 ## 4. Direct-first, relay fallback (tunnel details)
 

@@ -168,8 +168,10 @@ Notes:
   private key never leaves the device.
 - `behind_nat` / `nat_type` are self-reported (ideally from a STUN probe). The server uses them to
   decide whether to prefer direct peering or relay.
-- In v0, **one device == one worker**, so a single device can have at most one active worker (the
-  server rejects a second active worker for the same device/key).
+- One account may run **multiple workers** (e.g. the same model on several machines). The server
+  enforces a per-account worker cap and rejects a second worker for the **same device** (same WG
+  pubkey). Each worker-scoped key is bound to the worker it registered, so cluster readiness and
+  config are attributed to the correct device even within one account.
 
 **Success — `201 Created`**
 
