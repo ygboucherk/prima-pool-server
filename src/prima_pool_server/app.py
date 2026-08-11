@@ -515,15 +515,37 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         target = f"{head_url}/v1/chat/completions"
         stream = bool(body.get("stream", False))
         try:
-            async with httpx.AsyncClient(timeout=300) as client:
-                if stream:
-                    req = client.build_request("POST", target, json=body)
-                    resp = await client.send(req, stream=True)
-                    return StreamingResponse(
-                        resp.aiter_bytes(),
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type", "text/event-stream"),
-                    )
+            if stream:
+                # Keep the httpx client alive for the WHOLE response body, and
+                # tolerate a premature upstream close: llama-server may drop the
+                # TCP connection after the last SSE chunk instead of sending a
+                # clean `data: [DONE]` terminator. Treating a mid-stream
+                # ReadError as end-of-stream is correct for SSE — the tokens
+                # already delivered are valid.
+                #
+                # The status code / content-type are taken from the single
+                # streaming request itself (no separate probe — probing would
+                # run the generation twice). Success is 200, which is the
+                # StreamingResponse default.
+                async def proxy_stream():
+                    # trust_env=False: the upstream is on the WG tunnel; a
+                    # host-level HTTP(S)_PROXY must NOT intercept it.
+                    async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
+                        async with client.stream(
+                            "POST", target, json=body, timeout=300
+                        ) as resp:
+                            try:
+                                async for chunk in resp.aiter_bytes():
+                                    yield chunk
+                            except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError):
+                                # Upstream dropped the connection after sending
+                                # its final bytes. End the stream cleanly; the
+                                # client got everything llama-server produced.
+                                logger.warning("upstream stream ended prematurely: %s", target)
+                                return
+
+                return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+            async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
                 resp = await client.post(target, json=body)
                 return JSONResponse(status_code=resp.status_code, content=resp.json())
         except httpx.HTTPError as exc:
