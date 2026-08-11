@@ -13,6 +13,11 @@ individual pieces, see:
 - [Protocol docs](../protocol/overview.md)
 - [OpenAPI spec](../openapi/prima-pool.yaml)
 
+> **Already ran a v0 pool?** A two-machine (public VPS pool + NAT'd laptop)
+> CPU-only deployment with hardware specs, memory limits, and measured
+> performance lives in
+> [Tested two-machine CPU cluster](../../../prima-pool-client/docs/tests/two-machine-cpu-cluster.md).
+
 ---
 
 ## Architecture recap

@@ -68,7 +68,7 @@ To manage API keys, the account logs in and receives a short-lived session token
 **Success — `200 OK`**
 
 ```json
-{ "session_token": "sess_01HZ5...", "expires_at": "2026-08-06T13:00:00Z" }
+{ "session_token": "sess_<token>.<expiry>.<hmac>", "expires_at": "2026-08-06T13:00:00Z" }
 ```
 
 **Errors** — `401 invalid_credentials`.

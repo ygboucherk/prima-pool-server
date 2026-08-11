@@ -81,7 +81,7 @@ On cluster formation, the server sends each member:
 ```
 
 `config_url` lets the worker **re-pull** the full config (idempotent), and is the recovery path
-for missed `cluster_config` pushes.
+for missed assignments (e.g. a dropped WS push or a client that reconnects after recovery).
 
 **Ring order**: the cluster is a prima.cpp **ring** — `peers` in the cluster config is an *ordered*
 list (index 0 = ring head). `ring_position` in this frame tells the member its own index, so it
@@ -102,7 +102,7 @@ same ring from `GET /config`.
   },
   "relay": {
     "pubkey": "relay_public_key",
-    "endpoint": "relay1.pool.example.com:51820",
+    "endpoint": "relay.pool.example.com:51822",
     "enabled": true
   },
   "peers": [

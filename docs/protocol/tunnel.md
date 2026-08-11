@@ -95,7 +95,7 @@ over the tunnel to the head. This requires `NET_ADMIN` + `/dev/net/tun` on the s
 | Signal                              | Action                                     |
 | ----------------------------------- | ------------------------------------------ |
 | Direct handshake OK                 | Stay direct                                |
-| Direct handshake timeout (> 5 s)    | Switch to relay                            |
+| Direct handshake stale (no handshake in the last 120 s) | Switch to relay |
 | Direct keepalive loss (> 3 missed)  | Switch to relay, re-probe direct in background |
 
 ## 5. Readiness timeout

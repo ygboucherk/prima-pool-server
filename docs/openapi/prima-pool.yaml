@@ -215,6 +215,7 @@ paths:
       summary: Register a worker device with a worker-scoped key (joins the model's waitlist).
       security:
         - apiKeyAuth: []
+        - sessionAuth: []
       requestBody:
         required: true
         content:
@@ -242,6 +243,7 @@ paths:
       summary: Revoke a worker (leave the waitlist / cluster).
       security:
         - apiKeyAuth: []
+        - sessionAuth: []
       parameters:
         - $ref: "#/components/parameters/WorkerId"
       responses:
@@ -261,6 +263,7 @@ paths:
       summary: Recover the worker's full current state (WS recovery path).
       security:
         - apiKeyAuth: []
+        - sessionAuth: []
       parameters:
         - $ref: "#/components/parameters/WorkerId"
       responses:
@@ -282,6 +285,7 @@ paths:
       summary: Report liveness.
       security:
         - apiKeyAuth: []
+        - sessionAuth: []
       parameters:
         - $ref: "#/components/parameters/WorkerId"
       responses:
@@ -299,6 +303,7 @@ paths:
       summary: Fetch the WireGuard cluster config (idempotent, re-pullable).
       security:
         - apiKeyAuth: []
+        - sessionAuth: []
       parameters:
         - $ref: "#/components/parameters/ClusterId"
       responses:
@@ -322,6 +327,7 @@ paths:
       summary: Report that this worker has brought up WireGuard and joined prima.cpp.
       security:
         - apiKeyAuth: []
+        - sessionAuth: []
       parameters:
         - $ref: "#/components/parameters/ClusterId"
       requestBody:

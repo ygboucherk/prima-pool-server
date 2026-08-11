@@ -30,7 +30,9 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 - **Account dashboard (static GUI)** — a static web page at `/ui` that logs in with a
   session token and shows the account's workers + keys via `GET /v1/accounts/{id}/dashboard`.
 
-Out of scope for v0: usage/accounting, eviction/rebalance (churn), and the relay node.
+Out of scope for v0: usage/accounting, eviction/rebalance (churn), and
+automatic relay orchestration (a manual relay deployment is documented in the
+setup guide Part 6).
 
 ## GUI
 
@@ -120,7 +122,7 @@ All settings are read from `PRIMA_POOL_*` environment variables. See
 | `PRIMA_POOL_RELAY_ENABLED` | `false` | Relay fallback enabled (see setup guide Part 6) |
 | `PRIMA_POOL_RELAY_PUBKEY` | — | Relay's WireGuard public key |
 | `PRIMA_POOL_RELAY_ENDPOINT` | — | Relay's reachable endpoint `host:port` |
-| `PRIMA_POOL_STORE_PATH` | unset | SQLite DB path (in-memory if unset). Legacy JSON snapshots are auto-migrated on first open |
+| `PRIMA_POOL_STORE_PATH` | unset (Docker: `/data/store.db`) | SQLite DB path (in-memory if unset). In Docker the compose sets `/data/store.db` on a named volume. Legacy JSON snapshots are auto-migrated on first open |
 | `PRIMA_POOL_API_PORT` | `8080` | Head's llama-server port (proxied) |
 | `PRIMA_POOL_SERVER_JOIN_WG` | `false` | Server joins cluster WG networks (proxy) |
 | `PRIMA_POOL_SERVER_WG_PRIVATE_KEY` | auto | Server WG private key (auto-generated) |
