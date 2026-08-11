@@ -171,18 +171,48 @@ def test_same_account_can_register_multiple_workers_same_model(client: TestClien
     assert w2["status"] == "waitlisted"
 
 
-def test_same_device_cannot_register_twice(client: TestClient):
-    """The same physical device (same WG pubkey) cannot register a second worker."""
+def test_same_device_reregister_updates_endpoint(client: TestClient, store: Store):
+    """Re-registering the same device (same WG pubkey) is NOT a conflict — it's
+    the device re-advertising its endpoint (e.g. moved networks or set
+    PRIMA_POOL_WG_ENDPOINT_HOST). The server must update the existing worker's
+    endpoint in place and keep the same worker_id."""
     acc = _register_account(client)
     sess = _login(client)
     key = _create_worker_key(client, acc["account_id"], sess["session_token"])
 
-    r1 = _register_worker(client, key, wg_pubkey="pubkey-device-1")
+    # First registration with a public endpoint.
+    r1 = client.post(
+        "/v1/workers/register",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "demo-model",
+            "gguf_sha256": "a" * 64,
+            "memory_allocated_mb": 4096,
+            "wg_pubkey": "pubkey-device-1",
+            "endpoint": {"host": "8.8.8.8", "port": 51820, "behind_nat": False, "nat_type": "none"},
+        },
+    )
     assert r1.status_code == 201, r1.text
+    prev_id = r1.json()["worker_id"]
 
-    r2 = _register_worker(client, key, wg_pubkey="pubkey-device-1")
-    assert r2.status_code == 409, r2.text
-    assert "device" in r2.json()["detail"].lower()
+    # Re-register the same device with a DIFFERENT public endpoint host.
+    r2 = client.post(
+        "/v1/workers/register",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "demo-model",
+            "gguf_sha256": "a" * 64,
+            "memory_allocated_mb": 4096,
+            "wg_pubkey": "pubkey-device-1",
+            "endpoint": {"host": "1.1.1.1", "port": 51820, "behind_nat": False, "nat_type": "none"},
+        },
+    )
+    assert r2.status_code == 201, r2.text
+    w2 = r2.json()
+    # Same worker (identity preserved), endpoint updated.
+    assert w2["worker_id"] == prev_id
+    stored = store.get_worker(prev_id)
+    assert stored.endpoint.host == "1.1.1.1"
 
 
 def test_cluster_formation_and_config(client: TestClient):

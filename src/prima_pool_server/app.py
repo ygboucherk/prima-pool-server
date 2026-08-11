@@ -377,18 +377,41 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         # Atomic check-and-create: enforces the per-account cap and the
         # one-device-one-worker rule (one worker per WG pubkey) without a race
         # between concurrent calls. Multiple workers may serve the same model.
+        #
+        # Re-registration with the SAME WG pubkey is NOT a conflict: it's the
+        # same device re-advertising its endpoint (e.g. the operator set
+        # PRIMA_POOL_WG_ENDPOINT_HOST, or the device moved networks). Update the
+        # existing worker's endpoint instead of rejecting.
         if not store.create_worker_if_available(rec, settings.max_workers_per_account):
             existing = store.list_workers_for_account(account_id)
             if len(existing) >= settings.max_workers_per_account:
                 raise ConflictError("worker_limit", "Worker Limit", "Too many workers for this account.")
-            raise ConflictError("worker_exists", "Worker Exists", "A worker for this device already exists.")
-        # Bind the presenting key to this worker (enables unambiguous per-key
-        # worker identity for cluster readiness/config later).
-        if bound_key_id:
-            try:
-                store.bind_api_key_to_worker(bound_key_id, rec.worker_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("failed to bind key %s to worker %s: %s", bound_key_id, rec.worker_id, exc)
+            prev = next((w for w in existing if w.wg_pubkey == body.wg_pubkey), None)
+            if prev is not None:
+                # Same device re-registering → update its endpoint (and any
+                # other changed fields) in place.
+                prev.endpoint = endpoint
+                prev.hardware = body.hardware
+                prev.model = body.model
+                prev.gguf_sha256 = body.gguf_sha256
+                prev.memory_allocated_mb = body.memory_allocated_mb
+                prev.status = WorkerStatus.waitlisted
+                prev.online = False
+                store.update_worker(prev)
+                if bound_key_id:
+                    store.bind_api_key_to_worker(bound_key_id, prev.worker_id)
+                logger.info("worker %s re-registered (endpoint updated to %s)", prev.worker_id, endpoint.host)
+                rec = prev
+            else:
+                raise ConflictError("worker_exists", "Worker Exists", "A worker for this device already exists.")
+        else:
+            # Bind the presenting key to this worker (enables unambiguous per-key
+            # worker identity for cluster readiness/config later).
+            if bound_key_id:
+                try:
+                    store.bind_api_key_to_worker(bound_key_id, rec.worker_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("failed to bind key %s to worker %s: %s", bound_key_id, rec.worker_id, exc)
         scheduler.check_and_form()
         # Re-read to reflect any immediate assignment.
         rec = store.get_worker(rec.worker_id)
