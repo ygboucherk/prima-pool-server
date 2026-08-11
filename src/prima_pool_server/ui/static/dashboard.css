@@ -209,14 +209,36 @@ td { color: #d6dbe6; }
 /* ── usage chart ────────────────────────────────────────────────────── */
 .usage-chart {
   display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  height: 180px;
+  align-items: stretch;
+  gap: 8px;
+  height: 200px;
   padding: 12px 8px 0;
   background: #161d2b;
   border: 1px solid #273049;
   border-radius: 8px;
   margin-bottom: 24px;
+}
+.usage-axis {
+  flex: 0 0 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-right: 6px;
+  border-right: 1px solid #273049;
+  font-size: 0.7rem;
+  color: #8b93a7;
+}
+.usage-axis-tick {
+  line-height: 1;
+  transform: translateY(50%);
+}
+.usage-bars {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-width: 0;
 }
 .usage-bar {
   flex: 1;
@@ -226,6 +248,7 @@ td { color: #d6dbe6; }
   justify-content: flex-end;
   height: 100%;
   gap: 6px;
+  min-width: 0;
 }
 .usage-bar-inner {
   width: 100%;

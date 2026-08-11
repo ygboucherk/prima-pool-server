@@ -161,6 +161,21 @@
     empty.hidden = any;
     chart.hidden = !any;
 
+    // Vertical axis: 4 evenly-spaced ticks from 0 to max.
+    const axis = document.createElement('div');
+    axis.className = 'usage-axis';
+    const ticks = 4;
+    for (let i = 0; i <= ticks; i++) {
+      const value = Math.round(max * i / ticks);
+      const tick = document.createElement('div');
+      tick.className = 'usage-axis-tick';
+      tick.textContent = value.toLocaleString();
+      axis.appendChild(tick);
+    }
+    chart.appendChild(axis);
+
+    const bars = document.createElement('div');
+    bars.className = 'usage-bars';
     for (const t of totals) {
       const total = t.prompt + t.completion;
       const bar = document.createElement('div');
@@ -174,8 +189,9 @@
       label.className = 'usage-bar-label';
       label.textContent = fmtDayLabel(t.begin);
       bar.appendChild(label);
-      chart.appendChild(bar);
+      bars.appendChild(bar);
     }
+    chart.appendChild(bars);
   }
 
   function renderUsageLogs(logs) {
