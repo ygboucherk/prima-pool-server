@@ -70,8 +70,9 @@ def _parse_sse_usage(raw: bytes) -> tuple[int, int] | None:
     """
     import json
 
-    prompt: int | None = None
-    completion: int | None = None
+    prompt = 0
+    completion = 0
+    seen = False
     for line in raw.split(b"\n"):
         line = line.strip()
         if not line.startswith(b"data:"):
@@ -87,12 +88,15 @@ def _parse_sse_usage(raw: bytes) -> tuple[int, int] | None:
         if not isinstance(usage, dict):
             continue
         try:
+            # A chunk may carry only one of the two counts; keep the other
+            # from a prior chunk (or 0 if none seen yet).
             prompt = int(usage.get("prompt_tokens", prompt))
             completion = int(usage.get("completion_tokens", completion))
+            seen = True
         except (TypeError, ValueError):
             # Malformed token count — ignore this chunk rather than crash.
             continue
-    if prompt is None or completion is None:
+    if not seen:
         return None
     return prompt, completion
 
@@ -699,17 +703,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         account_id: str,
         begin: float,
         end: float,
+        limit: int = 1000,
         authorization: str | None = Header(None),
     ):
         """Return the account's inference logs in [begin, end), newest first.
 
         Auth: user-scoped API key OR the account session token. begin/end are
-        Unix timestamps (seconds).
+        Unix timestamps (seconds). `limit` caps the number of entries returned
+        (default 1000) so a large window doesn't silently truncate.
         """
         if _user_credential(authorization) != account_id:
             raise ForbiddenError("Cannot view another account's usage.")
         if begin >= end:
             raise BadRequestError("'begin' must be before 'end'.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
         return [
             RequestLogEntry(
                 request_id=r.request_id,
@@ -719,7 +727,34 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 completion_tokens=r.completion_tokens,
                 created_at=r.created_at,
             )
-            for r in store.list_requests_in_range(account_id, begin, end)
+            for r in store.list_requests_in_range(account_id, begin, end, limit=limit)
+        ]
+
+    @app.get("/v1/accounts/{account_id}/usage/logs/latest", response_model=list[RequestLogEntry])
+    async def account_usage_logs_latest(
+        account_id: str,
+        limit: int = 50,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's most recent `limit` inference logs, newest first.
+
+        Auth: user-scoped API key OR the account session token. `limit` is the
+        maximum number of entries to return (default 50).
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        return [
+            RequestLogEntry(
+                request_id=r.request_id,
+                model=r.model,
+                cluster_id=r.cluster_id,
+                prompt_tokens=r.prompt_tokens,
+                completion_tokens=r.completion_tokens,
+                created_at=r.created_at,
+            )
+            for r in store.list_requests_for_account(account_id, limit=limit)
         ]
 
     @app.post("/v1/accounts/{account_id}/usage/stats")

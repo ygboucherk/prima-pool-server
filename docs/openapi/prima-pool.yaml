@@ -424,9 +424,49 @@ paths:
           required: true
           schema: { type: number }
           description: End of the window (Unix seconds, exclusive).
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 1000, minimum: 1 }
+          description: Maximum number of entries to return.
       responses:
         "200":
           description: The account's request logs in the window.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RequestLogEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /accounts/{account_id}/usage/logs/latest:
+    get:
+      tags: [accounts]
+      operationId: accountUsageLogsLatest
+      summary: Return the account's most recent inference logs, newest first.
+      description: >
+        Auth: user-scoped API key OR the account session token. Returns up to
+        `limit` of the account's most recent request logs, ordered by timestamp
+        descending (newest first).
+      security:
+        - apiKeyAuth: []
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1 }
+          description: Maximum number of entries to return.
+      responses:
+        "200":
+          description: The account's most recent request logs.
           content:
             application/json:
               schema:

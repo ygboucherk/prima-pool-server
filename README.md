@@ -29,9 +29,10 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
   cluster WG network). See [Inference proxy](#inference-proxy).
 - **Usage accounting (user-side)** — every inference is logged to a `requests` table
   (request id, API key, model, cluster, prompt/completion tokens, timestamp). Users can
-  query their own logs and per-model statistics via
-  `GET /v1/accounts/{id}/usage/logs` and `POST /v1/accounts/{id}/usage/stats`
-  (auth: user key OR session token). See [Usage & accounting](#usage--accounting).
+  query their own logs (by time range or latest N) and per-model statistics via
+  `GET /v1/accounts/{id}/usage/logs`, `GET /v1/accounts/{id}/usage/logs/latest`, and
+  `POST /v1/accounts/{id}/usage/stats` (auth: user key OR session token).
+  See [Usage & accounting](#usage--accounting).
 - **Account dashboard (static GUI)** — a static web page at `/ui` that logs in with a
   session token and shows the account's workers + keys via `GET /v1/accounts/{id}/dashboard`.
 
@@ -121,8 +122,12 @@ it — survive for auditing and future worker crediting.
 A user can query their own usage with a user-scoped API key or session token:
 
 ```bash
-# Logs in [begin, end) (Unix seconds), newest first
-curl "http://<server>:8000/v1/accounts/<account_id>/usage/logs?begin=0&end=9999999999" \
+# Logs in [begin, end) (Unix seconds), newest first (limit caps the count)
+curl "http://<server>:8000/v1/accounts/<account_id>/usage/logs?begin=0&end=9999999999&limit=100" \
+  -H "Authorization: Bearer sk-user-..."
+
+# The account's most recent N logs, newest first (default 50)
+curl "http://<server>:8000/v1/accounts/<account_id>/usage/logs/latest?limit=10" \
   -H "Authorization: Bearer sk-user-..."
 
 # Per-model statistics over one or more (begin, end) windows
@@ -133,8 +138,8 @@ curl -X POST http://<server>:8000/v1/accounts/<account_id>/usage/stats \
 ```
 
 The stats endpoint returns one object per window, mapping each model to its
-`{requests, prompt_tokens, completion_tokens}` totals. Both endpoints reject
-requests for another account's id (403) and worker-scoped keys (403).
+`{requests, prompt_tokens, completion_tokens}` totals. All three endpoints
+reject requests for another account's id (403) and worker-scoped keys (403).
 
 ## Configuration
 

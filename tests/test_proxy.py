@@ -433,6 +433,35 @@ def test_usage_logs_endpoint(client: TestClient, store: Store):
     assert logs[1]["cluster_id"] == "clu_1"
 
 
+def test_usage_logs_endpoint_limit(client: TestClient, store: Store):
+    user_key = _new_user(client)
+    account_id = store.resolve_api_key(user_key).account_id
+    key_id = store.resolve_api_key(user_key).key_id
+
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 30, 40, 200.0)
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 50, 60, 300.0)
+
+    # limit=1 -> only the newest entry in the window.
+    r = client.get(
+        f"/v1/accounts/{account_id}/usage/logs",
+        params={"begin": 0, "end": 1000, "limit": 1},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    logs = r.json()
+    assert len(logs) == 1
+    assert logs[0]["prompt_tokens"] == 50
+
+    # Invalid limit is rejected.
+    r = client.get(
+        f"/v1/accounts/{account_id}/usage/logs",
+        params={"begin": 0, "end": 1000, "limit": 0},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 400
+
+
 def test_usage_logs_endpoint_requires_own_account(client: TestClient, store: Store):
     user_key = _new_user(client)
     account_id = store.resolve_api_key(user_key).account_id
@@ -453,6 +482,45 @@ def test_usage_logs_endpoint_rejects_worker_key(client: TestClient, store: Store
         headers={"Authorization": f"Bearer {key}"},
     )
     assert r.status_code == 403
+
+
+def test_usage_logs_latest_endpoint(client: TestClient, store: Store):
+    user_key = _new_user(client)
+    account_id = store.resolve_api_key(user_key).account_id
+    key_id = store.resolve_api_key(user_key).key_id
+
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 30, 40, 200.0)
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 50, 60, 300.0)
+
+    # Latest 2 -> the two most recent, newest first.
+    r = client.get(
+        f"/v1/accounts/{account_id}/usage/logs/latest",
+        params={"limit": 2},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    logs = r.json()
+    assert len(logs) == 2
+    assert logs[0]["prompt_tokens"] == 50
+    assert logs[0]["completion_tokens"] == 60
+    assert logs[1]["prompt_tokens"] == 30
+
+    # Default limit returns all three.
+    r = client.get(
+        f"/v1/accounts/{account_id}/usage/logs/latest",
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200
+    assert len(r.json()) == 3
+
+    # Invalid limit is rejected.
+    r = client.get(
+        f"/v1/accounts/{account_id}/usage/logs/latest",
+        params={"limit": 0},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 400
 
 
 def test_usage_stats_endpoint(client: TestClient, store: Store):
@@ -494,3 +562,23 @@ def test_usage_stats_endpoint_multiple_windows(client: TestClient, store: Store)
     assert len(stats) == 2
     assert stats[0]["model-a"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 20}
     assert stats[1]["model-a"] == {"requests": 1, "prompt_tokens": 30, "completion_tokens": 40}
+
+
+def test_parse_sse_usage_partial_counts():
+    from prima_pool_server.app import _parse_sse_usage
+
+    # A chunk carrying only prompt_tokens must still yield a result (completion
+    # defaults to 0), not be dropped entirely.
+    body = b'data: {"choices":[],"usage":{"prompt_tokens":7}}\n\n'
+    assert _parse_sse_usage(body) == (7, 0)
+
+    # A chunk carrying only completion_tokens.
+    body = b'data: {"choices":[],"usage":{"completion_tokens":9}}\n\n'
+    assert _parse_sse_usage(body) == (0, 9)
+
+    # A later chunk fills in the missing field from an earlier one.
+    body = (
+        b'data: {"choices":[],"usage":{"prompt_tokens":7}}\n\n'
+        b'data: {"choices":[],"usage":{"completion_tokens":9}}\n\n'
+    )
+    assert _parse_sse_usage(body) == (7, 9)

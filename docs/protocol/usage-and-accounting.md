@@ -31,12 +31,14 @@ cluster lifecycle — this is what will let the worker-crediting side later join
 
 Two account-scoped endpoints expose this (auth: user key OR session token):
 
-- `GET /v1/accounts/{id}/usage/logs?begin=&end=` — the account's logs in
-  `[begin, end)` (Unix seconds), newest first.
+- `GET /v1/accounts/{id}/usage/logs?begin=&end=&limit=` — the account's logs in
+  `[begin, end)` (Unix seconds), newest first; `limit` caps the count (default 1000).
+- `GET /v1/accounts/{id}/usage/logs/latest?limit=N` — the account's most
+  recent `N` logs, newest first (default 50).
 - `POST /v1/accounts/{id}/usage/stats` with `{"windows": [[begin, end], ...]}`
   — per-window `{model: {requests, prompt_tokens, completion_tokens}}`.
 
-Both reject other accounts and worker-scoped keys (403).
+All three reject other accounts and worker-scoped keys (403).
 
 ## 1. The unit: token·layer
 
