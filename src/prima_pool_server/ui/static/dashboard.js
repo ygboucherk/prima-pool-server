@@ -114,21 +114,104 @@
     }
   }
 
-  // Render the inference usage tab. There is no server endpoint for usage
-  // yet, so we show the user-scoped keys as a placeholder summary.
-  function refreshUsageTab() {
-    if (!overview) return;
-    const userKeys = overview.keys.filter((k) => k.scope === 'user');
+  // ── inference usage tab ──────────────────────────────────────────────
+  // Fetches the account's usage stats (last 7 days, local timezone) and its
+  // most recent request logs, then renders a bar chart + a logs table.
+
+  // Start of the local day (midnight) for a Date, as a Unix timestamp (s).
+  function startOfLocalDay(d) {
+    const copy = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    return Math.floor(copy.getTime() / 1000);
+  }
+
+  // Build the 7 daily windows [startOfDay, startOfNextDay) ending today.
+  function last7DayWindows() {
+    const now = new Date();
+    const todayStart = startOfLocalDay(now);
+    const windows = [];
+    for (let i = 6; i >= 0; i--) {
+      const begin = todayStart - i * 86400;
+      windows.push([begin, begin + 86400]);
+    }
+    return windows;
+  }
+
+  function fmtDayLabel(begin) {
+    const d = new Date(begin * 1000);
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+
+  function renderUsageChart(stats) {
+    const chart = $('usage-chart');
+    const empty = $('usage-chart-empty');
+    chart.innerHTML = '';
+    const windows = last7DayWindows();
+    // stats is an array of per-window objects {model: {requests, prompt_tokens, completion_tokens}}.
+    const totals = windows.map((w, i) => {
+      const win = stats[i] || {};
+      let prompt = 0, completion = 0;
+      for (const m of Object.values(win)) {
+        prompt += m.prompt_tokens || 0;
+        completion += m.completion_tokens || 0;
+      }
+      return { begin: w[0], prompt, completion };
+    });
+    const max = Math.max(1, ...totals.map((t) => t.prompt + t.completion));
+    const any = totals.some((t) => t.prompt + t.completion > 0);
+    empty.hidden = any;
+    chart.hidden = !any;
+
+    for (const t of totals) {
+      const total = t.prompt + t.completion;
+      const bar = document.createElement('div');
+      bar.className = 'usage-bar';
+      const inner = document.createElement('div');
+      inner.className = 'usage-bar-inner';
+      inner.style.height = (total / max * 100) + '%';
+      inner.title = `${fmtDayLabel(t.begin)}: ${total.toLocaleString()} tokens`;
+      bar.appendChild(inner);
+      const label = document.createElement('div');
+      label.className = 'usage-bar-label';
+      label.textContent = fmtDayLabel(t.begin);
+      bar.appendChild(label);
+      chart.appendChild(bar);
+    }
+  }
+
+  function renderUsageLogs(logs) {
     const tbody = $('usage-body');
     tbody.innerHTML = '';
-    if (!userKeys.length) {
-      tbody.innerHTML = '<tr><td colspan="3" class="empty">No user keys yet — inference usage will appear here once the server exposes a usage endpoint.</td></tr>';
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No requests yet</td></tr>';
       return;
     }
-    for (const k of userKeys) {
+    for (const log of logs) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><code>${k.key_id}</code></td><td>${k.name}</td><td><span class="badge ${k.scope}">no usage recorded</span></td>`;
+      const when = new Date(log.created_at * 1000).toLocaleString();
+      tr.innerHTML = `
+        <td>${when}</td>
+        <td>${log.model}</td>
+        <td><code>${log.cluster_id}</code></td>
+        <td>${log.prompt_tokens}</td>
+        <td>${log.completion_tokens}</td>`;
       tbody.appendChild(tr);
+    }
+  }
+
+  async function refreshUsageTab() {
+    if (!sessionToken || !accountId) return;
+    try {
+      const [stats, logs] = await Promise.all([
+        api('/v1/accounts/' + accountId + '/usage/stats', {
+          method: 'POST',
+          body: JSON.stringify({ windows: last7DayWindows() }),
+        }),
+        api('/v1/accounts/' + accountId + '/usage/logs/latest?limit=15'),
+      ]);
+      renderUsageChart(stats);
+      renderUsageLogs(logs);
+    } catch (e) {
+      handleApiError(e);
     }
   }
 

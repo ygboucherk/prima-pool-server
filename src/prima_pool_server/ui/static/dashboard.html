@@ -62,10 +62,16 @@
 
         <section id="tab-usage" hidden>
           <h2>Inference usage</h2>
-          <p class="hint">Token consumption for user keys will appear here once the server exposes a usage endpoint (design-only in v0 — see <code>docs/protocol/usage-and-accounting.md</code>).</p>
+          <p class="hint">Daily token consumption over the last 7 days (local timezone), and your most recent requests.</p>
+
+          <h3>Daily usage (last 7 days)</h3>
+          <div id="usage-chart" class="usage-chart" aria-label="Daily token usage bar chart"></div>
+          <p id="usage-chart-empty" class="empty" hidden>No usage in the last 7 days.</p>
+
+          <h3>Latest requests</h3>
           <table>
-            <thead><tr><th>Key</th><th>Name</th><th>Status</th></tr></thead>
-            <tbody id="usage-body"><tr><td colspan="3" class="empty">No usage reported yet</td></tr></tbody>
+            <thead><tr><th>When</th><th>Model</th><th>Cluster</th><th>Prompt</th><th>Completion</th></tr></thead>
+            <tbody id="usage-body"><tr><td colspan="5" class="empty">No requests yet</td></tr></tbody>
           </table>
         </section>
 
