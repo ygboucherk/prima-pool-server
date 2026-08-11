@@ -141,6 +141,26 @@
     return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
   }
 
+  // Pick a "nice" axis step (1/2/5 × 10^n) so the tick levels are rounded,
+  // evenly-spaced numbers rather than arbitrary fractions of the max.
+  // The step is never fractional: for small maxima it rounds up to a whole
+  // number so the levels stay clean (e.g. max=1 -> step=1, not 0.5).
+  function niceStep(max, ticks) {
+    const raw = max / ticks;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    let step;
+    if (norm <= 1) step = 1;
+    else if (norm <= 2) step = 2;
+    else if (norm <= 5) step = 5;
+    else step = 10;
+    step *= mag;
+    // Round fractional steps up to the next whole number.
+    if (step < 1) step = 1;
+    else if (step % 1 !== 0) step = Math.ceil(step);
+    return step;
+  }
+
   function renderUsageChart(stats) {
     const chart = $('usage-chart');
     const empty = $('usage-chart-empty');
@@ -161,12 +181,16 @@
     empty.hidden = any;
     chart.hidden = !any;
 
-    // Vertical axis: 4 evenly-spaced ticks from 0 to max.
+    // Vertical axis: evenly-spaced rounded levels from 0 (bottom) to a nice
+    // ceiling (top). The step is chosen so levels are round numbers.
+    const ticks = 4;
+    const step = niceStep(max, ticks);
+    const ceiling = step * ticks;
     const axis = document.createElement('div');
     axis.className = 'usage-axis';
-    const ticks = 4;
-    for (let i = 0; i <= ticks; i++) {
-      const value = Math.round(max * i / ticks);
+    // First child sits at the TOP with space-between, so emit max..0.
+    for (let i = ticks; i >= 0; i--) {
+      const value = step * i;
       const tick = document.createElement('div');
       tick.className = 'usage-axis-tick';
       tick.textContent = value.toLocaleString();
@@ -182,7 +206,7 @@
       bar.className = 'usage-bar';
       const inner = document.createElement('div');
       inner.className = 'usage-bar-inner';
-      inner.style.height = (total / max * 100) + '%';
+      inner.style.height = (total / ceiling * 100) + '%';
       inner.title = `${fmtDayLabel(t.begin)}: ${total.toLocaleString()} tokens`;
       bar.appendChild(inner);
       const label = document.createElement('div');
