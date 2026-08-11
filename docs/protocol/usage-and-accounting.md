@@ -1,7 +1,42 @@
-# Usage & accounting — design notes (v1+)
+# Usage & accounting
 
-**Status:** Design only. Endpoints are **not** part of the v0 OpenAPI spec; this document records
-the intended model so the negotiation protocol doesn't paint us into a corner.
+**Status:** The **user-side** half is implemented in v0 (see §0). The **worker-side**
+crediting model below remains design-only for v1+; this document records the intended
+model so the negotiation protocol doesn't paint us into a corner.
+
+## 0. Implemented in v0 (user-side accounting)
+
+The server logs every inference request proxied through `POST /v1/chat/completions`
+into a `requests` table (SQLite store):
+
+| Column | Meaning |
+| ------ | ------- |
+| `request_id` | unique id (`req_<hex>`) |
+| `account_id` | source user (FK → accounts) |
+| `key_id` | originating API key (FK → api_keys) |
+| `model` | model used |
+| `cluster_id` | which cluster processed it (FK → clusters) |
+| `prompt_tokens` / `completion_tokens` | input/output tokens |
+| `created_at` | timestamp |
+
+Token counts come from the upstream llama-server `usage` object; for streaming
+requests they are parsed from the final SSE chunk before `data: [DONE]`. If the
+upstream closes before sending `usage`, no record is written (no false
+zero-token entries). Accounting is best-effort and never breaks inference.
+
+Clusters are **soft-deleted** (marked `terminated`, not removed), so the
+`requests.cluster_id` reference stays valid and usage history survives the
+cluster lifecycle — this is what will let the worker-crediting side later join
+`requests → clusters → members` to attribute work.
+
+Two account-scoped endpoints expose this (auth: user key OR session token):
+
+- `GET /v1/accounts/{id}/usage/logs?begin=&end=` — the account's logs in
+  `[begin, end)` (Unix seconds), newest first.
+- `POST /v1/accounts/{id}/usage/stats` with `{"windows": [[begin, end], ...]}`
+  — per-window `{model: {requests, prompt_tokens, completion_tokens}}`.
+
+Both reject other accounts and worker-scoped keys (403).
 
 ## 1. The unit: token·layer
 
@@ -40,7 +75,9 @@ accounting will need:
 
 ## 4. Compatibility constraints for v0
 
-- Usage reports will be `POST /v1/clusters/{id}/usage` (tentative) — designed later.
+- The user-side usage endpoints are implemented (`/v1/accounts/{id}/usage/logs`,
+  `/v1/accounts/{id}/usage/stats`). The worker-side report endpoint
+  `POST /v1/clusters/{id}/usage` (tentative) remains design-only for v1+.
 - Keep `worker.memory_allocated_mb` and cluster membership stable so accounting can attribute work.
 - The `relay.enabled` transparency requirement stays: workers must know when they're relaying,
   because relayed work may be paid differently.

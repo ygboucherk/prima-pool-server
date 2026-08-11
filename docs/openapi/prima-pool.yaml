@@ -5,8 +5,8 @@ info:
   description: >
     Negotiation protocol for the prima-pool inference pool. Accounts register with a username and
     password, create scoped API keys (worker / user), and worker devices log in with a worker key
-    to join WireGuard clusters. Usage/accounting endpoints are intentionally out of scope
-    (see docs/protocol/usage-and-accounting.md).
+    to join WireGuard clusters. User-scoped usage/log endpoints let an account view its own
+    inference history and per-model statistics (see docs/protocol/usage-and-accounting.md).
 servers:
   - url: https://pool.example.com/v1
 tags:
@@ -400,6 +400,84 @@ paths:
         "502":
           description: Upstream cluster head unreachable.
 
+  /accounts/{account_id}/usage/logs:
+    get:
+      tags: [accounts]
+      operationId: accountUsageLogs
+      summary: Return the account's inference logs in [begin, end), newest first.
+      description: >
+        Auth: user-scoped API key OR the account session token. `begin` and `end`
+        are Unix timestamps (seconds); the range is half-open `[begin, end)`.
+        Only the owning account may view its own logs.
+      security:
+        - apiKeyAuth: []
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: begin
+          in: query
+          required: true
+          schema: { type: number }
+          description: Start of the window (Unix seconds, inclusive).
+        - name: end
+          in: query
+          required: true
+          schema: { type: number }
+          description: End of the window (Unix seconds, exclusive).
+      responses:
+        "200":
+          description: The account's request logs in the window.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RequestLogEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /accounts/{account_id}/usage/stats:
+    post:
+      tags: [accounts]
+      operationId: accountUsageStats
+      summary: Aggregate the account's usage over a list of (begin, end) windows.
+      description: >
+        Auth: user-scoped API key OR the account session token. Takes a list of
+        (begin, end) windows and returns one per-window object mapping each model
+        to its {requests, prompt_tokens, completion_tokens} totals.
+      security:
+        - apiKeyAuth: []
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UsageStatsRequest"
+      responses:
+        "200":
+          description: Per-window per-model usage aggregates.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties:
+                    $ref: "#/components/schemas/ModelUsage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
 components:
   securitySchemes:
     apiKeyAuth:
@@ -742,3 +820,35 @@ components:
           enum: [assembling, live, terminated]
         members_ready: { type: integer }
         members_total: { type: integer }
+
+    RequestLogEntry:
+      type: object
+      required: [request_id, model, cluster_id, prompt_tokens, completion_tokens, created_at]
+      properties:
+        request_id: { type: string }
+        model: { type: string }
+        cluster_id: { type: string }
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        created_at: { type: number, description: Unix timestamp (seconds) }
+
+    UsageStatsRequest:
+      type: object
+      required: [windows]
+      properties:
+        windows:
+          type: array
+          description: List of (begin, end) Unix-second windows.
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+
+    ModelUsage:
+      type: object
+      required: [requests, prompt_tokens, completion_tokens]
+      properties:
+        requests: { type: integer }
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }

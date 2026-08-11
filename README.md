@@ -27,12 +27,17 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 - **Inference proxy** — `POST /v1/chat/completions` (auth: user key) routes a request
   to a live cluster's head over the WireGuard tunnel (option A: the server joins the
   cluster WG network). See [Inference proxy](#inference-proxy).
+- **Usage accounting (user-side)** — every inference is logged to a `requests` table
+  (request id, API key, model, cluster, prompt/completion tokens, timestamp). Users can
+  query their own logs and per-model statistics via
+  `GET /v1/accounts/{id}/usage/logs` and `POST /v1/accounts/{id}/usage/stats`
+  (auth: user key OR session token). See [Usage & accounting](#usage--accounting).
 - **Account dashboard (static GUI)** — a static web page at `/ui` that logs in with a
   session token and shows the account's workers + keys via `GET /v1/accounts/{id}/dashboard`.
 
-Out of scope for v0: usage/accounting, eviction/rebalance (churn), and
-automatic relay orchestration (a manual relay deployment is documented in the
-setup guide Part 6).
+Out of scope for v0: worker-side crediting (the other half of accounting),
+eviction/rebalance (churn), and automatic relay orchestration (a manual relay
+deployment is documented in the setup guide Part 6).
 
 ## GUI
 
@@ -100,6 +105,36 @@ curl http://<server>:8000/v1/chat/completions \
 
 Streaming (`"stream": true`, SSE) is supported. Requires `NET_ADMIN` +
 `/dev/net/tun` on the server (already in `docker-compose.yml`).
+
+## Usage & accounting
+
+Every inference request proxied through `POST /v1/chat/completions` is logged
+to a `requests` table in the SQLite store: request id, originating API key,
+model, cluster, prompt/completion tokens, and a timestamp. Token counts come
+from the upstream `usage` object (for streaming, parsed from the final SSE
+chunk). Accounting is best-effort — a logging failure never breaks inference.
+
+Clusters are **soft-deleted**: when a cluster dissolves it is marked
+`terminated` (not removed), so its history — and the `requests` that reference
+it — survive for auditing and future worker crediting.
+
+A user can query their own usage with a user-scoped API key or session token:
+
+```bash
+# Logs in [begin, end) (Unix seconds), newest first
+curl "http://<server>:8000/v1/accounts/<account_id>/usage/logs?begin=0&end=9999999999" \
+  -H "Authorization: Bearer sk-user-..."
+
+# Per-model statistics over one or more (begin, end) windows
+curl -X POST http://<server>:8000/v1/accounts/<account_id>/usage/stats \
+  -H "Authorization: Bearer sk-user-..." \
+  -H "Content-Type: application/json" \
+  -d '{"windows": [[0, 9999999999]]}'
+```
+
+The stats endpoint returns one object per window, mapping each model to its
+`{requests, prompt_tokens, completion_tokens}` totals. Both endpoints reject
+requests for another account's id (403) and worker-scoped keys (403).
 
 ## Configuration
 
