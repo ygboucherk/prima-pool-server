@@ -31,6 +31,16 @@ WORKDIR /app
 COPY --from=base /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=base /usr/local/bin/prima-pool-server /usr/local/bin/prima-pool-server
 
+# Runtime deps for the server-side WireGuard join (option A): the server
+# brings up a wg-quick interface per cluster to proxy inference to the head.
+# Without these, ServerWireGuard.up() fails with "wg-quick/wg not found" and
+# /v1/chat/completions returns 502 (can't reach the head over the tunnel).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wireguard-tools \
+        iproute2 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # SQLite state database (mount a volume here to persist state).
 ENV PRIMA_POOL_STORE_PATH=/data/store.db
 VOLUME ["/data"]
