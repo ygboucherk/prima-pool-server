@@ -36,7 +36,10 @@ from .models import (
     RegisterAccountRequest,
     RegisterWorkerRequest,
     ReportReadyRequest,
+    RequestLogEntry,
+    RequestRecord,
     Session,
+    UsageStatsRequest,
     Worker,
     WorkerRecord,
     WorkerState,
@@ -54,6 +57,44 @@ logger = logging.getLogger(__name__)
 
 def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _parse_sse_usage(raw: bytes) -> tuple[int, int] | None:
+    """Extract (prompt_tokens, completion_tokens) from a buffered SSE body.
+
+    llama-server emits a final `data: {...}` chunk carrying a `usage` object
+    before `data: [DONE]`. We scan every `data:` line, parse the JSON, and
+    return the last `usage` seen. Returns None if no `usage` chunk is present
+    (e.g. the upstream closed before sending usage, or the body isn't SSE) —
+    callers must not record a request in that case.
+    """
+    import json
+
+    prompt: int | None = None
+    completion: int | None = None
+    for line in raw.split(b"\n"):
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[len(b"data:"):].strip()
+        if not payload or payload == b"[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        try:
+            prompt = int(usage.get("prompt_tokens", prompt))
+            completion = int(usage.get("completion_tokens", completion))
+        except (TypeError, ValueError):
+            # Malformed token count — ignore this chunk rather than crash.
+            continue
+    if prompt is None or completion is None:
+        return None
+    return prompt, completion
 
 
 def _client_ip(request: Request) -> str:
@@ -139,15 +180,31 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError()
         return account_id
 
-    def _api_key(authorization: str | None) -> tuple[str, str]:
-        """Return (account_id, scope) for a scoped API key."""
+    def _api_key(authorization: str | None) -> tuple[str, str, str]:
+        """Return (account_id, scope, key_id) for a scoped API key."""
         if not authorization or not authorization.lower().startswith("bearer "):
             raise UnauthorizedError()
         secret = authorization.split(" ", 1)[1].strip()
         rec = store.resolve_api_key(secret)
         if rec is None:
             raise UnauthorizedError("The provided API key is not valid.")
-        return rec.account_id, rec.scope
+        return rec.account_id, rec.scope, rec.key_id
+
+    def _user_credential(authorization: str | None) -> str:
+        """Resolve the account_id for a user-scoped credential.
+
+        Accepts EITHER a user-scoped API key (sk-user-...) OR the account
+        session token. Worker-scoped keys are rejected. Used by the
+        account-scoped usage/log endpoints.
+        """
+        if authorization and authorization.lower().startswith("bearer "):
+            secret = authorization.split(" ", 1)[1].strip()
+            rec = store.resolve_api_key(secret)
+            if rec is not None:
+                if rec.scope != "user":
+                    raise ForbiddenError("A worker key cannot view usage.")
+                return rec.account_id
+        return _session_account(authorization)
 
     def _worker_credential(authorization: str | None) -> tuple[str, str, str | None, str | None]:
         """Resolve (account_id, scope, key_id, bound_worker_id) from a
@@ -311,7 +368,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         body: RegisterWorkerRequest,
         authorization: str | None = Header(None),
     ):
-        account_id, scope = _api_key(authorization)
+        account_id, scope, _ = _api_key(authorization)
         if scope != "worker":
             raise ForbiddenError("A user key cannot register workers.")
 
@@ -517,7 +574,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         for the requested model and forwards the request to the head's
         llama-server over the WireGuard tunnel.
         """
-        account_id, scope = _api_key(authorization)
+        account_id, scope, key_id = _api_key(authorization)
         if scope != "user":
             raise ForbiddenError("Only a user key can send inference requests.")
 
@@ -537,6 +594,25 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
         target = f"{head_url}/v1/chat/completions"
         stream = bool(body.get("stream", False))
+        request_id = new_id("req")
+
+        def _log_usage(prompt_tokens: int, completion_tokens: int) -> None:
+            """Persist a request record for accounting (best-effort)."""
+            try:
+                store.record_request(
+                    RequestRecord(
+                        request_id=request_id,
+                        account_id=account_id,
+                        key_id=key_id,
+                        model=model,
+                        cluster_id=cluster.cluster_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - accounting must never break inference
+                logger.exception("failed to record usage for request %s", request_id)
+
         try:
             if stream:
                 # Keep the httpx client alive for the WHOLE response body, and
@@ -557,20 +633,40 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                         async with client.stream(
                             "POST", target, json=body, timeout=300
                         ) as resp:
+                            # Buffer the SSE stream so we can parse the final
+                            # `usage` chunk for token accounting while still
+                            # forwarding every byte to the client.
+                            buffer = bytearray()
                             try:
                                 async for chunk in resp.aiter_bytes():
+                                    buffer.extend(chunk)
                                     yield chunk
                             except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError):
                                 # Upstream dropped the connection after sending
                                 # its final bytes. End the stream cleanly; the
                                 # client got everything llama-server produced.
                                 logger.warning("upstream stream ended prematurely: %s", target)
-                                return
+                            finally:
+                                # Only record usage if the upstream actually
+                                # sent a `usage` chunk. If it closed before
+                                # that (abrupt close), there's no token count
+                                # to log — recording (0,0) would be a false
+                                # "zero-token request" entry.
+                                parsed = _parse_sse_usage(bytes(buffer))
+                                if parsed is not None:
+                                    prompt_tokens, completion_tokens = parsed
+                                    _log_usage(prompt_tokens, completion_tokens)
 
                 return StreamingResponse(proxy_stream(), media_type="text/event-stream")
             async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
                 resp = await client.post(target, json=body)
-                return JSONResponse(status_code=resp.status_code, content=resp.json())
+                data = resp.json()
+                usage = data.get("usage") or {}
+                _log_usage(
+                    int(usage.get("prompt_tokens", 0)),
+                    int(usage.get("completion_tokens", 0)),
+                )
+                return JSONResponse(status_code=resp.status_code, content=data)
         except httpx.HTTPError as exc:
             logger.error("proxy to %s failed: %s", target, exc)
             raise ProblemError(
@@ -596,6 +692,65 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if session_account != account_id:
             raise ForbiddenError("Cannot view another account's dashboard.")
         return build_account_overview(store, account_id)
+
+    # ── usage / logs (account-scoped) ────────────────────────────────────
+    @app.get("/v1/accounts/{account_id}/usage/logs", response_model=list[RequestLogEntry])
+    async def account_usage_logs(
+        account_id: str,
+        begin: float,
+        end: float,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's inference logs in [begin, end), newest first.
+
+        Auth: user-scoped API key OR the account session token. begin/end are
+        Unix timestamps (seconds).
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if begin >= end:
+            raise BadRequestError("'begin' must be before 'end'.")
+        return [
+            RequestLogEntry(
+                request_id=r.request_id,
+                model=r.model,
+                cluster_id=r.cluster_id,
+                prompt_tokens=r.prompt_tokens,
+                completion_tokens=r.completion_tokens,
+                created_at=r.created_at,
+            )
+            for r in store.list_requests_in_range(account_id, begin, end)
+        ]
+
+    @app.post("/v1/accounts/{account_id}/usage/stats")
+    async def account_usage_stats(
+        account_id: str,
+        body: UsageStatsRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Aggregate the account's usage over a list of (begin, end) windows.
+
+        Auth: user-scoped API key OR the account session token. Returns one
+        entry per window: {model: {requests, prompt_tokens, completion_tokens}}.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        result = []
+        for begin, end in body.windows:
+            if begin >= end:
+                raise BadRequestError("Each window's 'begin' must be before its 'end'.")
+            stats = store.usage_stats_in_range(account_id, begin, end)
+            result.append(
+                {
+                    model: {
+                        "requests": reqs,
+                        "prompt_tokens": prompt,
+                        "completion_tokens": completion,
+                    }
+                    for model, (reqs, prompt, completion) in stats.items()
+                }
+            )
+        return result
 
     # ── WebSocket ────────────────────────────────────────────────────────
     @app.websocket("/v1/workers/{worker_id}/events")

@@ -54,7 +54,14 @@ class Scheduler:
         assigned IP (a dissolved cluster's members may still have their WG
         interface up with the old IP until they process cluster_dissolved).
         """
-        used = {c.subnet for c in self.store.list_clusters()}
+        # Only live/assembling clusters hold an active subnet. Terminated
+        # clusters' subnets are freed for reuse: their members' assigned IPs
+        # are cleared on dissolution, so nothing references them anymore.
+        used = {
+            c.subnet
+            for c in self.store.list_clusters()
+            if c.status != ClusterStatus.terminated
+        }
         base = self.settings.cluster_subnet_prefix
         # Collect subnets still referenced by any worker's assigned IP.
         for w in self.store.list_workers():
@@ -207,7 +214,13 @@ class Scheduler:
         return cluster
 
     def _dissolve_cluster(self, cluster: ClusterRecord, reason: str) -> None:
-        """Return all members to the waitlist and notify them."""
+        """Return all members to the waitlist and mark the cluster terminated.
+
+        The cluster row is retained (status=terminated) rather than deleted so
+        its history survives for accounting/auditing — e.g. the `requests`
+        table references it, and future worker crediting needs to know which
+        members hosted each request.
+        """
         member_ids = list(cluster.members)
         for wid in member_ids:
             w = self.store.get_worker(wid)
@@ -218,8 +231,9 @@ class Scheduler:
             w.assigned_ip = None
             w.ring_position = None
             self.store.update_worker(w)
-        self.store.delete_cluster(cluster.cluster_id)
-        logger.info("dissolved cluster %s (%s)", cluster.cluster_id, reason)
+        cluster.status = ClusterStatus.terminated
+        self.store.update_cluster(cluster)
+        logger.info("terminated cluster %s (%s)", cluster.cluster_id, reason)
         # Option A: the server leaves the cluster's WG network.
         if self.wg_server.enabled:
             try:

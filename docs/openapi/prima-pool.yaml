@@ -739,6 +739,6 @@ components:
         cluster_id: { type: string }
         status:
           type: string
-          enum: [assembling, live]
+          enum: [assembling, live, terminated]
         members_ready: { type: integer }
         members_total: { type: integer }

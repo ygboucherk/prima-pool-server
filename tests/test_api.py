@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from prima_pool_server.app import create_app
 from prima_pool_server.config import ModelDef, Settings
+from prima_pool_server.models import ClusterRecord, ClusterStatus
 from prima_pool_server.store import Store
 
 
@@ -385,13 +386,14 @@ def test_cluster_ready_and_live(client: TestClient):
     assert r2.json()["status"] == "live"
 
 
-def test_worker_leave_dissolves_cluster(client: TestClient):
+def test_worker_leave_dissolves_cluster(client: TestClient, store: Store):
     key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
     key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
     for key, w in ((key1, w1), (key2, w2)):
         client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "assigned"
+    cluster_id = st1["cluster"]["cluster_id"]
 
     # w2 leaves -> cluster dissolves, w1 returns to waitlist.
     r = client.delete(f"/v1/workers/{w2['worker_id']}", headers={"Authorization": f"Bearer {key2}"})
@@ -399,6 +401,41 @@ def test_worker_leave_dissolves_cluster(client: TestClient):
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "waitlisted"
     assert st1["cluster"] is None
+
+    # The cluster row is retained (not deleted) and marked terminated, so its
+    # history survives for accounting/auditing.
+    cluster = store.get_cluster(cluster_id)
+    assert cluster is not None
+    assert cluster.status.value == "terminated"
+
+
+def test_terminated_cluster_subnet_is_reused(store: Store):
+    """A terminated cluster's subnet must be freed for reuse.
+
+    Since terminated clusters are retained forever, their subnets must not
+    count as 'used' — otherwise the 255-subnet pool would eventually exhaust
+    and block all future cluster formation.
+    """
+    from prima_pool_server.scheduler import Scheduler
+
+    scheduler = Scheduler(store=store, settings=Settings(), hub=None)
+
+    # A live cluster occupies 10.23.1.0/24.
+    live = ClusterRecord(
+        cluster_id="clu_live",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["w1"],
+        ips={"w1": "10.23.1.1"},
+        status=ClusterStatus.live,
+    )
+    store.create_cluster(live)
+    assert scheduler._next_subnet() == "10.23.2.0/24"
+
+    # Terminate it: the subnet is freed for reuse.
+    live.status = ClusterStatus.terminated
+    store.update_cluster(live)
+    assert scheduler._next_subnet() == "10.23.1.0/24"
 
 
 def test_worker_key_cannot_access_other_worker(client: TestClient):

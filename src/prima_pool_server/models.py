@@ -22,6 +22,9 @@ class WorkerStatus(str, Enum):
 class ClusterStatus(str, Enum):
     assembling = "assembling"
     live = "live"
+    # Terminal state: the cluster has been dissolved (a member went offline or
+    # left). The row is retained for history/accounting rather than deleted.
+    terminated = "terminated"
 
 
 class NatType(str, Enum):
@@ -182,6 +185,29 @@ class ClusterStatusResponse(BaseModel):
     members_total: int
 
 
+class RequestLogEntry(BaseModel):
+    """A single logged inference request (user-facing view)."""
+
+    request_id: str
+    model: str
+    cluster_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    created_at: float
+
+
+class UsageStatsRequest(BaseModel):
+    """A list of (begin, end) time windows to aggregate usage over."""
+
+    windows: list[tuple[float, float]]
+
+
+class ModelUsage(BaseModel):
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+
+
 # ── Domain dataclasses (internal state) ──────────────────────────────────
 @dataclass
 class AccountRecord:
@@ -265,3 +291,22 @@ class ClusterRecord:
     created_at: float = field(default_factory=time.time)
     # worker_id -> assigned private IP
     ips: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class RequestRecord:
+    """A single inference request logged for accounting (user-side, v0).
+
+    Captured by the proxy in `chat_completions`. Token counts come from the
+    upstream llama-server `usage` object; for streaming requests they are
+    parsed from the final SSE chunk before `data: [DONE]`.
+    """
+
+    request_id: str
+    account_id: str
+    key_id: str
+    model: str
+    cluster_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    created_at: float = field(default_factory=time.time)

@@ -13,6 +13,7 @@ from prima_pool_server.models import (
     ClusterStatus,
     EndpointInfo,
     Hardware,
+    RequestRecord,
     WorkerRecord,
     WorkerStatus,
 )
@@ -168,6 +169,121 @@ def test_cluster_persistence_roundtrip(tmp_path):
     assert c.ips == {"wrk_1": "10.23.1.1", "wrk_2": "10.23.1.2"}
     assert c.status == ClusterStatus.live
     assert c.members == ["wrk_1", "wrk_2"]
+
+
+def test_request_recording_roundtrip(tmp_path):
+    path = str(tmp_path / "store.db")
+    s = Store(path=path)
+    acc = s.create_account("alice", "hunter2hunter2")
+    assert acc is not None
+    key, _ = s.create_api_key(acc.account_id, "user", "user")
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["wrk_1"],
+        ips={"wrk_1": "10.23.1.1"},
+        status=ClusterStatus.live,
+    )
+    s.create_cluster(clu)
+
+    s.record_request(
+        RequestRecord(
+            request_id="req_1",
+            account_id=acc.account_id,
+            key_id=key.key_id,
+            model="demo-model",
+            cluster_id="clu_1",
+            prompt_tokens=12,
+            completion_tokens=34,
+        )
+    )
+
+    s2 = Store(path=path)
+    reqs = s2.list_requests_for_account(acc.account_id)
+    assert len(reqs) == 1
+    r = reqs[0]
+    assert r.request_id == "req_1"
+    assert r.key_id == key.key_id
+    assert r.model == "demo-model"
+    assert r.cluster_id == "clu_1"
+    assert r.prompt_tokens == 12
+    assert r.completion_tokens == 34
+    assert r.created_at > 0
+
+
+def test_request_recording_orders_newest_first(tmp_path):
+    s = Store(path=str(tmp_path / "store.db"))
+    acc = s.create_account("alice", "hunter2hunter2")
+    key, _ = s.create_api_key(acc.account_id, "user", "user")
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["wrk_1"],
+        ips={"wrk_1": "10.23.1.1"},
+        status=ClusterStatus.live,
+    )
+    s.create_cluster(clu)
+
+    for i in range(3):
+        s.record_request(
+            RequestRecord(
+                request_id=f"req_{i}",
+                account_id=acc.account_id,
+                key_id=key.key_id,
+                model="demo-model",
+                cluster_id="clu_1",
+                prompt_tokens=i,
+                completion_tokens=i * 2,
+            )
+        )
+
+    reqs = s.list_requests_for_account(acc.account_id)
+    assert [r.request_id for r in reqs] == ["req_2", "req_1", "req_0"]
+
+
+def test_request_survives_cluster_termination(tmp_path):
+    """A request record must NOT be deleted when its cluster is terminated.
+
+    Clusters are soft-deleted (status=terminated) rather than removed, and the
+    requests.cluster_id FK does not cascade — so usage history survives the
+    cluster lifecycle (needed for accounting and future worker crediting).
+    """
+    s = Store(path=str(tmp_path / "store.db"))
+    acc = s.create_account("alice", "hunter2hunter2")
+    key, _ = s.create_api_key(acc.account_id, "user", "user")
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["wrk_1"],
+        ips={"wrk_1": "10.23.1.1"},
+        status=ClusterStatus.live,
+    )
+    s.create_cluster(clu)
+    s.record_request(
+        RequestRecord(
+            request_id="req_1",
+            account_id=acc.account_id,
+            key_id=key.key_id,
+            model="demo-model",
+            cluster_id="clu_1",
+            prompt_tokens=5,
+            completion_tokens=7,
+        )
+    )
+
+    # Terminate the cluster (soft-delete: mark terminated, keep the row).
+    clu.status = ClusterStatus.terminated
+    s.update_cluster(clu)
+
+    # The request record must still be there, referencing the retained cluster.
+    reqs = s.list_requests_for_account(acc.account_id)
+    assert len(reqs) == 1
+    assert reqs[0].cluster_id == "clu_1"
+    assert s.get_cluster("clu_1") is not None
+    assert s.get_cluster("clu_1").status == ClusterStatus.terminated
 
 
 def test_account_and_key_persistence(tmp_path):

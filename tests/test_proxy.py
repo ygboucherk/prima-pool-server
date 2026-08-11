@@ -214,3 +214,283 @@ def test_proxy_streaming_survives_abrupt_upstream_close(client: TestClient, monk
     # The client receives both SSE chunks despite the abrupt upstream close.
     assert "Hel" in r.text
     assert "lo" in r.text
+
+
+def _serve_usage_sse(prompt_tokens: int, completion_tokens: int) -> str:
+    """A fake head that streams a couple of chunks plus a final usage chunk."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n')
+            self.wfile.flush()
+            usage = (
+                'data: {"choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":%d}}\n\n'
+                % (prompt_tokens, completion_tokens)
+            )
+            self.wfile.write(usage.encode())
+            self.wfile.flush()
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+        def log_message(self, *args):  # silence
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    return f"http://{host}:{port}", server
+
+
+def _serve_usage_json(prompt_tokens: int, completion_tokens: int) -> str:
+    """A fake head that returns a non-streaming JSON response with usage."""
+    import json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            body = json.dumps(
+                {
+                    "id": "cmpl-1",
+                    "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # silence
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    return f"http://{host}:{port}", server
+
+
+def _live_cluster(client: TestClient):
+    """Form a live cluster and return (user_key, cluster_id)."""
+    key1, w1 = _new_worker(client, "bob", "pubkey1")
+    key2, w2 = _new_worker(client, "carol", "pubkey2")
+    client.post(f"/v1/workers/{w1['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key1}"})
+    client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    cluster_id = st1["cluster"]["cluster_id"]
+    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
+    user_key = _new_user(client)
+    return user_key, cluster_id
+
+
+def test_proxy_records_usage_non_streaming(client: TestClient, store: Store, monkeypatch):
+    from prima_pool_server.router import ClusterRouter
+
+    base_url, server = _serve_usage_json(prompt_tokens=7, completion_tokens=9)
+    monkeypatch.setattr(ClusterRouter, "head_url", lambda self, cluster: base_url)
+
+    user_key, cluster_id = _live_cluster(client)
+    r = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {user_key}"},
+        json={"model": "demo-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    server.shutdown()
+    assert r.status_code == 200, r.text
+
+    account_id = store.resolve_api_key(user_key).account_id
+    reqs = store.list_requests_for_account(account_id)
+    assert len(reqs) == 1
+    assert reqs[0].prompt_tokens == 7
+    assert reqs[0].completion_tokens == 9
+    assert reqs[0].model == "demo-model"
+    assert reqs[0].cluster_id == cluster_id
+
+
+def test_proxy_records_usage_streaming(client: TestClient, store: Store, monkeypatch):
+    from prima_pool_server.router import ClusterRouter
+
+    base_url, server = _serve_usage_sse(prompt_tokens=3, completion_tokens=5)
+    monkeypatch.setattr(ClusterRouter, "head_url", lambda self, cluster: base_url)
+
+    user_key, cluster_id = _live_cluster(client)
+    r = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {user_key}"},
+        json={"model": "demo-model", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    server.shutdown()
+    assert r.status_code == 200, r.text
+    assert "Hi" in r.text
+
+    account_id = store.resolve_api_key(user_key).account_id
+    reqs = store.list_requests_for_account(account_id)
+    assert len(reqs) == 1
+    assert reqs[0].prompt_tokens == 3
+    assert reqs[0].completion_tokens == 5
+    assert reqs[0].cluster_id == cluster_id
+
+
+def test_parse_sse_usage_extracts_last_usage():
+    from prima_pool_server.app import _parse_sse_usage
+
+    body = (
+        b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    assert _parse_sse_usage(body) == (3, 5)
+
+
+def test_parse_sse_usage_returns_none_without_usage():
+    from prima_pool_server.app import _parse_sse_usage
+
+    # No usage chunk (e.g. abrupt upstream close before usage was sent).
+    body = b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
+    assert _parse_sse_usage(body) is None
+    # Empty / non-SSE body.
+    assert _parse_sse_usage(b"") is None
+    assert _parse_sse_usage(b"not sse at all") is None
+
+
+def test_parse_sse_usage_ignores_malformed_token_counts():
+    from prima_pool_server.app import _parse_sse_usage
+
+    # A malformed (non-numeric) token count must not crash the parser.
+    body = (
+        b'data: {"choices":[],"usage":{"prompt_tokens":"oops","completion_tokens":5}}\n\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":4}}\n\n'
+    )
+    assert _parse_sse_usage(body) == (2, 4)
+
+
+def _record_usage(store: Store, account_id: str, key_id: str, model: str, cluster_id: str,
+                  prompt: int, completion: int, created_at: float):
+    from prima_pool_server.models import ClusterRecord, ClusterStatus, RequestRecord
+
+    # Ensure the referenced cluster exists (requests.cluster_id is an FK).
+    if store.get_cluster(cluster_id) is None:
+        store.create_cluster(
+            ClusterRecord(
+                cluster_id=cluster_id,
+                model=model,
+                subnet="10.23.1.0/24",
+                members=["w1"],
+                ips={"w1": "10.23.1.1"},
+                status=ClusterStatus.live,
+            )
+        )
+    store.record_request(
+        RequestRecord(
+            request_id=f"req_{created_at}",
+            account_id=account_id,
+            key_id=key_id,
+            model=model,
+            cluster_id=cluster_id,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            created_at=created_at,
+        )
+    )
+
+
+def test_usage_logs_endpoint(client: TestClient, store: Store):
+    # Create a user + key, then record usage directly in the store.
+    user_key = _new_user(client)
+    account_id = store.resolve_api_key(user_key).account_id
+    key_id = store.resolve_api_key(user_key).key_id
+
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 30, 40, 200.0)
+    _record_usage(store, account_id, key_id, "demo-model", "clu_1", 50, 60, 300.0)
+
+    # Logs in [150, 350) -> only the 200 and 300 entries, newest first.
+    r = client.get(
+        f"/v1/accounts/{account_id}/usage/logs",
+        params={"begin": 150, "end": 350},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    logs = r.json()
+    assert len(logs) == 2
+    assert logs[0]["prompt_tokens"] == 50
+    assert logs[0]["completion_tokens"] == 60
+    assert logs[1]["prompt_tokens"] == 30
+    assert logs[1]["model"] == "demo-model"
+    assert logs[1]["cluster_id"] == "clu_1"
+
+
+def test_usage_logs_endpoint_requires_own_account(client: TestClient, store: Store):
+    user_key = _new_user(client)
+    account_id = store.resolve_api_key(user_key).account_id
+    # A different account id must be rejected.
+    r = client.get(
+        f"/v1/accounts/acc_other/usage/logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 403
+
+
+def test_usage_logs_endpoint_rejects_worker_key(client: TestClient, store: Store):
+    key, _ = _new_worker(client, "frank", "pubkey5")
+    r = client.get(
+        "/v1/accounts/acc_x/usage/logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert r.status_code == 403
+
+
+def test_usage_stats_endpoint(client: TestClient, store: Store):
+    user_key = _new_user(client)
+    account_id = store.resolve_api_key(user_key).account_id
+    key_id = store.resolve_api_key(user_key).key_id
+
+    _record_usage(store, account_id, key_id, "model-a", "clu_1", 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "model-a", "clu_1", 30, 40, 200.0)
+    _record_usage(store, account_id, key_id, "model-b", "clu_1", 5, 6, 150.0)
+
+    r = client.post(
+        f"/v1/accounts/{account_id}/usage/stats",
+        json={"windows": [[0, 1000]]},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    stats = r.json()
+    assert len(stats) == 1
+    assert stats[0]["model-a"] == {"requests": 2, "prompt_tokens": 40, "completion_tokens": 60}
+    assert stats[0]["model-b"] == {"requests": 1, "prompt_tokens": 5, "completion_tokens": 6}
+
+
+def test_usage_stats_endpoint_multiple_windows(client: TestClient, store: Store):
+    user_key = _new_user(client)
+    account_id = store.resolve_api_key(user_key).account_id
+    key_id = store.resolve_api_key(user_key).key_id
+
+    _record_usage(store, account_id, key_id, "model-a", "clu_1", 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "model-a", "clu_1", 30, 40, 200.0)
+
+    r = client.post(
+        f"/v1/accounts/{account_id}/usage/stats",
+        json={"windows": [[0, 150], [150, 1000]]},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    stats = r.json()
+    assert len(stats) == 2
+    assert stats[0]["model-a"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 20}
+    assert stats[1]["model-a"] == {"requests": 1, "prompt_tokens": 30, "completion_tokens": 40}

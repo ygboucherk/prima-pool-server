@@ -32,6 +32,7 @@ from .models import (
     ClusterStatus,
     EndpointInfo,
     Hardware,
+    RequestRecord,
     WorkerRecord,
     WorkerStatus,
 )
@@ -94,6 +95,20 @@ CREATE TABLE IF NOT EXISTS workers (
 CREATE INDEX IF NOT EXISTS idx_workers_account ON workers(account_id);
 CREATE INDEX IF NOT EXISTS idx_workers_model ON workers(model, gguf_sha256);
 CREATE INDEX IF NOT EXISTS idx_workers_cluster ON workers(cluster_id);
+
+CREATE TABLE IF NOT EXISTS requests (
+    request_id       TEXT PRIMARY KEY,
+    account_id       TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+    key_id           TEXT NOT NULL REFERENCES api_keys(key_id) ON DELETE CASCADE,
+    model            TEXT NOT NULL,
+    cluster_id       TEXT NOT NULL REFERENCES clusters(cluster_id),
+    prompt_tokens    INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_requests_account ON requests(account_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_requests_key ON requests(key_id);
+CREATE INDEX IF NOT EXISTS idx_requests_cluster ON requests(cluster_id);
 """
 
 
@@ -438,6 +453,68 @@ class Store:
         row = self._fetch_one("SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,))
         return ApiKeyRecord(**dict(row)) if row else None
 
+    # ── requests (usage accounting) ──────────────────────────────────────
+    def record_request(self, rec: RequestRecord) -> None:
+        """Persist a single inference request for accounting."""
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO requests "
+                    "(request_id, account_id, key_id, model, cluster_id, "
+                    " prompt_tokens, completion_tokens, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        rec.request_id,
+                        rec.account_id,
+                        rec.key_id,
+                        rec.model,
+                        rec.cluster_id,
+                        rec.prompt_tokens,
+                        rec.completion_tokens,
+                        rec.created_at,
+                    ),
+                )
+
+    def list_requests_for_account(self, account_id: str, limit: int = 100) -> list[RequestRecord]:
+        """Return the most recent requests for an account, newest first."""
+        rows = self._fetch_all(
+            "SELECT * FROM requests WHERE account_id = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (account_id, limit),
+        )
+        return [RequestRecord(**dict(r)) for r in rows]
+
+    def list_requests_in_range(
+        self, account_id: str, begin: float, end: float, limit: int = 1000
+    ) -> list[RequestRecord]:
+        """Return an account's requests with `begin <= created_at < end`,
+        newest first."""
+        rows = self._fetch_all(
+            "SELECT * FROM requests WHERE account_id = ? AND created_at >= ? AND created_at < ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (account_id, begin, end, limit),
+        )
+        return [RequestRecord(**dict(r)) for r in rows]
+
+    def usage_stats_in_range(
+        self, account_id: str, begin: float, end: float
+    ) -> dict[str, tuple[int, int, int]]:
+        """Aggregate an account's usage in [begin, end) per model.
+
+        Returns {model: (requests, prompt_tokens, completion_tokens)}.
+        """
+        rows = self._fetch_all(
+            "SELECT model, COUNT(*) AS requests, "
+            "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens "
+            "FROM requests WHERE account_id = ? AND created_at >= ? AND created_at < ? "
+            "GROUP BY model",
+            (account_id, begin, end),
+        )
+        return {
+            r["model"]: (r["requests"], r["prompt_tokens"], r["completion_tokens"])
+            for r in rows
+        }
+
     # ── workers ──────────────────────────────────────────────────────────
     def create_worker(self, rec: WorkerRecord) -> None:
         with self._lock:
@@ -535,9 +612,6 @@ class Store:
                     "ips_json=:ips_json WHERE cluster_id=:cluster_id",
                     _cluster_to_row(rec),
                 )
-
-    def delete_cluster(self, cluster_id: str) -> bool:
-        return self._mutating("DELETE FROM clusters WHERE cluster_id = ?", (cluster_id,)) > 0
 
     def list_clusters(self) -> list[ClusterRecord]:
         rows = self._fetch_all("SELECT * FROM clusters")
