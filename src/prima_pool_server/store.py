@@ -9,12 +9,18 @@ Schema:
   workers(id, account_id FK, model, gguf_sha256, memory_mb, status, online,
           cluster_id FK, last_heartbeat, assignable_at, created_at,
           wg_pubkey, endpoint_json, hardware_json, assigned_ip, ring_position)
-  clusters(id, model, subnet, status, created_at,
-           members_json, ready_json, ips_json, layer_windows_json)
+  clusters(id, model, subnet, status, created_at, distribution_reported)
+  cluster_members(cluster_id FK, worker_id, ring_position, assigned_ip, ready,
+                  layer_window, PRIMARY KEY(cluster_id, worker_id),
+                  UNIQUE(cluster_id, ring_position))
+  requests(id, account_id FK, key_id FK, model, cluster_id FK, tokens, created_at)
 
-JSON columns hold the structured fields (endpoint/hardware, member order,
-ready set, ip map, layer distribution); scalar columns provide relational
-queries and integrity.
+JSON columns are used ONLY for document-shaped fields that are read/written as
+a whole (endpoint/hardware on workers). Membership (order, ready set, ip map,
+layer distribution) is RELATIONAL — a worker can belong to many clusters over
+time (current + terminated history), so it lives in the junction table
+`cluster_members` (composite PK = one row per (cluster, worker)). Scalar
+columns provide relational queries and integrity.
 """
 from __future__ import annotations
 
@@ -69,12 +75,39 @@ CREATE TABLE IF NOT EXISTS clusters (
     subnet     TEXT NOT NULL,
     status     TEXT NOT NULL,
     created_at REAL NOT NULL,
-    members_json TEXT NOT NULL,
-    ready_json   TEXT NOT NULL,
-    ips_json     TEXT NOT NULL,
-    layer_windows_json TEXT
+    -- Whether the head has reported the layer distribution (possibly as
+    -- "unknown"). DISTINCT from the per-member layer_window values: this is a
+    -- cluster-level fact (None in ClusterRecord == not reported == 0 here),
+    -- and the liveness gate requires it to be set for a cluster to go live.
+    distribution_reported INTEGER NOT NULL DEFAULT 0
+        CHECK (distribution_reported IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_clusters_model ON clusters(model);
+
+-- Junction table: which workers are (or were) in which cluster, in ring
+-- order, with their assigned IP, readiness, and layer share. A worker can be
+-- a member of MANY clusters over time (one live/assembling + every terminated
+-- cluster it served in), so membership is many-to-many → composite PK. The
+-- UNIQUE (cluster_id, ring_position) constraint means a cluster can never
+-- have two members claiming the same ring slot (two "heads").
+--
+-- worker_id deliberately has NO FK: membership is HISTORICAL (terminated
+-- clusters keep their members for accounting), and revoking a worker deletes
+-- its row — a CASCADE would silently erase that worker from every terminated
+-- cluster's history (same rationale as requests.cluster_id not cascading).
+-- cluster_id cascades: cluster rows are soft-deleted (status=terminated), so
+-- a hard delete should remove its membership rows.
+CREATE TABLE IF NOT EXISTS cluster_members (
+    cluster_id    TEXT NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
+    worker_id     TEXT NOT NULL,
+    ring_position INTEGER NOT NULL CHECK (ring_position >= 0),
+    assigned_ip   TEXT,
+    ready         INTEGER NOT NULL DEFAULT 0 CHECK (ready IN (0, 1)),
+    layer_window  INTEGER CHECK (layer_window IS NULL OR layer_window >= 0),
+    PRIMARY KEY (cluster_id, worker_id),
+    UNIQUE (cluster_id, ring_position)
+);
+CREATE INDEX IF NOT EXISTS idx_cluster_members_worker ON cluster_members(worker_id);
 
 CREATE TABLE IF NOT EXISTS workers (
     worker_id      TEXT PRIMARY KEY,
@@ -166,26 +199,97 @@ def _cluster_to_row(c: ClusterRecord) -> dict:
         "subnet": c.subnet,
         "status": c.status.value,
         "created_at": c.created_at,
-        "members_json": json.dumps(c.members),
-        "ready_json": json.dumps(sorted(c.ready)),
-        "ips_json": json.dumps(c.ips),
-        "layer_windows_json": json.dumps(c.layer_windows) if c.layer_windows is not None else None,
+        # ClusterRecord.layer_windows is None (not reported) or a dict
+        # (reported — possibly {} = reported-unknown). The column is the
+        # boolean "has been reported".
+        "distribution_reported": int(c.layer_windows is not None),
     }
 
 
-def _row_to_cluster(row: sqlite3.Row) -> ClusterRecord:
-    lw = row["layer_windows_json"]
+def _load_cluster_members(conn: sqlite3.Connection, cluster_id: str) -> ClusterRecord | None:
+    """Hydrate a ClusterRecord's membership fields from the junction table.
+
+    `members` is in ring order (ORDER BY ring_position); `ready` is the set of
+    members with ready=1; `ips` maps worker_id → assigned_ip; `layer_windows`
+    maps worker_id → layer_window for members the head credited (NULL row =
+    that member not in the report — e.g. a forwarder that did no work, or an
+    'unknown' report). The `distribution_reported` column is authoritative:
+    it preserves the None-vs-{} distinction the liveness gate depends on.
+    """
+    row = conn.execute(
+        "SELECT * FROM clusters WHERE cluster_id = ?", (cluster_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    rows = conn.execute(
+        "SELECT worker_id, ring_position, assigned_ip, ready, layer_window "
+        "FROM cluster_members WHERE cluster_id = ? ORDER BY ring_position",
+        (cluster_id,),
+    ).fetchall()
+    members = [r["worker_id"] for r in rows]
+    ready = {r["worker_id"] for r in rows if r["ready"]}
+    ips = {r["worker_id"]: r["assigned_ip"] for r in rows if r["assigned_ip"]}
+    if row["distribution_reported"]:
+        layer_windows: dict[str, int] | None = {
+            r["worker_id"]: r["layer_window"]
+            for r in rows
+            if r["layer_window"] is not None
+        }
+    else:
+        layer_windows = None
     return ClusterRecord(
         cluster_id=row["cluster_id"],
         model=row["model"],
         subnet=row["subnet"],
         status=ClusterStatus(row["status"]),
         created_at=row["created_at"],
-        members=json.loads(row["members_json"]),
-        ready=set(json.loads(row["ready_json"])),
-        ips=json.loads(row["ips_json"]),
-        layer_windows=json.loads(lw) if lw not in (None, "null") else None,
+        members=members,
+        ready=ready,
+        ips=ips,
+        layer_windows=layer_windows,
     )
+
+
+def _save_cluster_members(conn: sqlite3.Connection, c: ClusterRecord) -> None:
+    """Rewrite the membership rows for a cluster from the record's fields.
+
+    Runs inside the caller's transaction. Uses INSERT ... ON CONFLICT (PK)
+    DO UPDATE so ready/layer_window/ip updates apply without deleting rows
+    first (preserves membership history and avoids churn). Ring order is
+    preserved by ring_position = index.
+    """
+    for i, wid in enumerate(c.members):
+        conn.execute(
+            "INSERT INTO cluster_members "
+            "(cluster_id, worker_id, ring_position, assigned_ip, ready, layer_window) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (cluster_id, worker_id) DO UPDATE SET "
+            "ring_position = excluded.ring_position, "
+            "assigned_ip = excluded.assigned_ip, "
+            "ready = excluded.ready, "
+            "layer_window = excluded.layer_window",
+            (
+                c.cluster_id,
+                wid,
+                i,
+                c.ips.get(wid),
+                int(wid in c.ready),
+                c.layer_windows.get(wid) if c.layer_windows else None,
+            ),
+        )
+    # Drop any member rows that are no longer in the ring (e.g. a re-formed
+    # cluster after a dissolve). FKs cascade, so removed workers are cleaned
+    # from the junction automatically; this just prunes stale rows here.
+    placeholders = ",".join("?" for _ in c.members)
+    if c.members:
+        conn.execute(
+            f"DELETE FROM cluster_members WHERE cluster_id = ? AND worker_id NOT IN ({placeholders})",
+            (c.cluster_id, *c.members),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM cluster_members WHERE cluster_id = ?", (c.cluster_id,)
+        )
 
 
 def _worker_from_legacy_dict(d: dict) -> WorkerRecord:
@@ -302,29 +406,120 @@ class Store:
         # v0.5: clusters.layer_windows_json stores the per-worker layer
         # distribution reported by the head (Halda). `CREATE TABLE IF NOT
         # EXISTS` won't add the column to pre-existing DBs, so ALTER it here.
+        #
+        # This step is gated on the presence of `members_json` — the definitive
+        # marker of a pre-v0.6 database. A fresh or already-migrated DB has no
+        # membership JSON columns, so this ALTER must NOT run (it would
+        # resurrect layer_windows_json after v0.6 dropped it, on every reopen).
+        # The backfill + v0.6 population below share the same gate.
         ccols = {r[1] for r in self._conn.execute("PRAGMA table_info(clusters)")}
-        if "layer_windows_json" not in ccols:
+        pre_v06 = "members_json" in ccols
+        if pre_v06 and "layer_windows_json" not in ccols:
             self._conn.execute(
                 "ALTER TABLE clusters ADD COLUMN layer_windows_json TEXT"
             )
             logger.info("migrated clusters: added column layer_windows_json")
-        # Backfill the invariant: a LIVE cluster that predates layer accounting
-        # must carry an explicit "unknown" distribution ({}) rather than NULL —
-        # the new liveness rule says a live cluster always has a distribution
-        # field. This matters because a server upgrade does NOT dissolve live
-        # clusters (liveness is worker-driven; workers re-heartbeat on
-        # reconnect and the head never re-reports), so a NULL here would
-        # persist indefinitely otherwise. Idempotent safety net: only touches
-        # rows that are live AND NULL.
-        cur = self._conn.execute(
-            "UPDATE clusters SET layer_windows_json = '{}' "
-            "WHERE status = 'live' AND layer_windows_json IS NULL"
-        )
-        if cur.rowcount:
-            logger.info(
-                "backfilled unknown layer distribution for %d live cluster(s)",
-                cur.rowcount,
+        if pre_v06:
+            # Backfill the invariant: a LIVE cluster that predates layer accounting
+            # must carry an explicit "unknown" distribution ({}) rather than NULL —
+            # the new liveness rule says a live cluster always has a distribution
+            # field. This matters because a server upgrade does NOT dissolve live
+            # clusters (liveness is worker-driven; workers re-heartbeat on
+            # reconnect and the head never re-reports), so a NULL here would
+            # persist indefinitely otherwise. Idempotent safety net: only touches
+            # rows that are live AND NULL.
+            cur = self._conn.execute(
+                "UPDATE clusters SET layer_windows_json = '{}' "
+                "WHERE status = 'live' AND layer_windows_json IS NULL"
             )
+            if cur.rowcount:
+                logger.info(
+                    "backfilled unknown layer distribution for %d live cluster(s)",
+                    cur.rowcount,
+                )
+        # v0.6: membership moves OUT of JSON blobs on the clusters row into the
+        # relational junction table `cluster_members`. Existing databases have
+        # members_json/ready_json/ips_json/layer_windows_json columns — copy
+        # their contents into the table once, then drop the columns (SQLite
+        # 3.35+; DROP COLUMN is supported since 3.35.0).
+        if pre_v06:
+            # The column might be absent in DBs that already dropped the
+            # JSON columns (e.g. a failed partial v0.6 run) — add it first
+            # so the population + drop below are safe.
+            if "distribution_reported" not in ccols:
+                self._conn.execute(
+                    "ALTER TABLE clusters ADD COLUMN distribution_reported "
+                    "INTEGER NOT NULL DEFAULT 0 CHECK (distribution_reported IN (0, 1))"
+                )
+                logger.info("migrated clusters: added column distribution_reported")
+            self._populate_cluster_members_from_json()
+            self._drop_cluster_json_columns()
+            logger.info("migrated clusters: membership JSON → cluster_members table")
+
+    def _populate_cluster_members_from_json(self) -> None:
+        """Copy membership from the legacy JSON columns into cluster_members.
+
+        The columns still exist at this point (they are dropped right after).
+        `members_json` is the authoritative order; each worker's ready/ip/
+        layer_window come from the sibling JSON columns. Rows are inserted
+        with INSERT OR IGNORE — the migration is idempotent (re-running after
+        a partial failure must not duplicate or fail on the PK).
+        """
+        for row in self._conn.execute(
+            "SELECT cluster_id, members_json, ready_json, ips_json, layer_windows_json FROM clusters"
+        ):
+            try:
+                members = json.loads(row["members_json"] or "[]")
+            except (ValueError, TypeError):
+                members = []
+            try:
+                ready = set(json.loads(row["ready_json"] or "[]"))
+            except (ValueError, TypeError):
+                ready = set()
+            try:
+                ips = json.loads(row["ips_json"] or "{}")
+            except (ValueError, TypeError):
+                ips = {}
+            try:
+                lw = json.loads(row["layer_windows_json"]) if row["layer_windows_json"] not in (None, "null") else None
+            except (ValueError, TypeError):
+                lw = None
+            for i, wid in enumerate(members):
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO cluster_members "
+                    "(cluster_id, worker_id, ring_position, assigned_ip, ready, layer_window) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        row["cluster_id"],
+                        wid,
+                        i,
+                        ips.get(wid) if isinstance(ips, dict) else None,
+                        int(wid in ready),
+                        (lw or {}).get(wid) if isinstance(lw, dict) else None,
+                    ),
+                )
+            # The legacy backfill invariant: a LIVE cluster always has a
+            # distribution (possibly {} = unknown). The old code wrote
+            # layer_windows_json='{}' for those rows, which is lw == {} here →
+            # reported. Assembling/terminated clusters with NULL keep
+            # distribution_reported = 0.
+            if lw is not None:
+                self._conn.execute(
+                    "UPDATE clusters SET distribution_reported = 1 WHERE cluster_id = ?",
+                    (row["cluster_id"],),
+                )
+
+    def _drop_cluster_json_columns(self) -> None:
+        """Drop the four legacy membership JSON columns from `clusters`.
+
+        SQLite requires them to be absent from indexes/triggers/views before
+        DROP COLUMN; ours have none (the migration runs before any of that is
+        created). Safe to call repeatedly — the columns won't exist the second
+        time, so each DROP is guarded.
+        """
+        for col in ("members_json", "ready_json", "ips_json", "layer_windows_json"):
+            if any(r[1] == col for r in self._conn.execute("PRAGMA table_info(clusters)")):
+                self._conn.execute(f"ALTER TABLE clusters DROP COLUMN {col}")
 
     # ── legacy migration ─────────────────────────────────────────────────
     def _find_legacy_json(self, db_path: str) -> str | None:
@@ -383,11 +578,27 @@ class Store:
                 clu = _cluster_from_legacy_dict(c)
                 conn.execute(
                     "INSERT OR IGNORE INTO clusters (cluster_id, model, subnet, status, created_at, "
-                    "members_json, ready_json, ips_json, layer_windows_json) "
+                    "distribution_reported) "
                     "VALUES (:cluster_id, :model, :subnet, :status, :created_at, "
-                    ":members_json, :ready_json, :ips_json, :layer_windows_json)",
+                    ":distribution_reported)",
                     _cluster_to_row(clu),
                 )
+                # Membership rows (junction table) — same shape as the JSON
+                # snapshot: members_json order + ready/ips/layer_windows.
+                for i, wid in enumerate(clu.members):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO cluster_members "
+                        "(cluster_id, worker_id, ring_position, assigned_ip, ready, layer_window) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            clu.cluster_id,
+                            wid,
+                            i,
+                            clu.ips.get(wid),
+                            int(wid in clu.ready),
+                            clu.layer_windows.get(wid) if clu.layer_windows else None,
+                        ),
+                    )
             for w in data.get("workers", []):
                 rec = _worker_from_legacy_dict(w)
                 conn.execute(
@@ -620,47 +831,151 @@ class Store:
 
     # ── clusters ─────────────────────────────────────────────────────────
     def create_cluster(self, rec: ClusterRecord) -> None:
+        """Persist a cluster and its membership (junction rows)."""
         with self._lock:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO clusters (cluster_id, model, subnet, status, created_at, "
-                    "members_json, ready_json, ips_json, layer_windows_json) "
+                    "distribution_reported) "
                     "VALUES (:cluster_id, :model, :subnet, :status, :created_at, "
-                    ":members_json, :ready_json, :ips_json, :layer_windows_json)",
+                    ":distribution_reported)",
                     _cluster_to_row(rec),
                 )
+                _save_cluster_members(self._conn, rec)
 
     def get_cluster(self, cluster_id: str) -> ClusterRecord | None:
-        row = self._fetch_one("SELECT * FROM clusters WHERE cluster_id = ?", (cluster_id,))
-        return _row_to_cluster(row) if row else None
+        with self._lock:
+            return _load_cluster_members(self._conn, cluster_id)
 
     def set_cluster_layer_windows(self, cluster_id: str, layer_windows: dict[str, int] | None) -> bool:
         """Record the head-reported per-worker layer distribution.
 
         Returns True if the cluster exists (and the value was persisted).
-        A value of None records "unknown" (parse failure) — the field is then
-        present-but-empty on the row, so a live cluster never has a missing
-        distribution entry.
+
+        Semantics (preserved from the JSON era):
+          - None  → "not reported": clears the reported flag and every
+                    member's window. Reads back as `layer_windows is None`,
+                    which BLOCKS the liveness gate.
+          - {}    → "reported unknown" (head parse failure): sets the reported
+                    flag, no windows. Reads back as {} — satisfies liveness.
+          - {wid: n, ...} → reported with windows.
         """
-        with self._lock:
-            with self._conn:
-                cur = self._conn.execute(
-                    "UPDATE clusters SET layer_windows_json = ? WHERE cluster_id = ?",
-                    (json.dumps(layer_windows) if layer_windows is not None else "null", cluster_id),
-                )
-                return cur.rowcount > 0
+        cluster = self.set_cluster_distribution(cluster_id, layer_windows)
+        return cluster is not None
 
     def update_cluster(self, rec: ClusterRecord) -> None:
+        """Update a cluster's scalar row and rewrite its membership rows."""
         with self._lock:
             with self._conn:
                 self._conn.execute(
                     "UPDATE clusters SET model=:model, subnet=:subnet, status=:status, "
-                    "created_at=:created_at, members_json=:members_json, ready_json=:ready_json, "
-                    "ips_json=:ips_json, layer_windows_json=:layer_windows_json "
+                    "created_at=:created_at, distribution_reported=:distribution_reported "
                     "WHERE cluster_id=:cluster_id",
                     _cluster_to_row(rec),
                 )
+                _save_cluster_members(self._conn, rec)
+
+    def mark_member_ready(self, cluster_id: str, worker_id: str) -> ClusterRecord | None:
+        """Atomically mark a member ready and re-evaluate the liveness gate.
+
+        Runs the read-modify-write (add member to ready set, check gate, flip
+        live) under the store RLock, so two concurrent `ready` reports can't
+        lose each other's update, and a dissolve racing a ready report can't
+        resurrect a terminated cluster (the gate refuses terminated). Returns
+        the fresh cluster record, or None if it doesn't exist.
+        """
+        with self._lock:
+            with self._conn:
+                cluster = _load_cluster_members(self._conn, cluster_id)
+                if cluster is None:
+                    return None
+                if cluster.status == ClusterStatus.terminated:
+                    return cluster
+                # Targeted member-row update — no whole-cluster rewrite.
+                self._conn.execute(
+                    "UPDATE cluster_members SET ready = 1 "
+                    "WHERE cluster_id = ? AND worker_id = ?",
+                    (cluster_id, worker_id),
+                )
+                # Re-read to compute the gate on fresh state.
+                cluster = _load_cluster_members(self._conn, cluster_id)
+                all_ready = len(cluster.ready) >= len(cluster.members)
+                reported = cluster.layer_windows is not None
+                if all_ready and reported and cluster.status != ClusterStatus.terminated:
+                    self._conn.execute(
+                        "UPDATE clusters SET status = 'live' WHERE cluster_id = ?",
+                        (cluster_id,),
+                    )
+                    cluster.status = ClusterStatus.live
+                return cluster
+
+    def set_cluster_distribution(self, cluster_id: str, layer_windows: dict[str, int] | None) -> ClusterRecord | None:
+        """Atomically record the layer distribution and re-evaluate liveness.
+
+        Same read-modify-write protection as `mark_member_ready`: the gate is
+        computed inside the RLock on fresh state. `None` = not reported (clears
+        the flag — blocks liveness); `{}` = reported-unknown (satisfies it).
+        Returns the fresh cluster record, or None if it doesn't exist.
+        """
+        with self._lock:
+            with self._conn:
+                cluster = _load_cluster_members(self._conn, cluster_id)
+                if cluster is None:
+                    return None
+                if cluster.status == ClusterStatus.terminated:
+                    return cluster
+                if layer_windows is None:
+                    self._conn.execute(
+                        "UPDATE clusters SET distribution_reported = 0 WHERE cluster_id = ?",
+                        (cluster_id,),
+                    )
+                    self._conn.execute(
+                        "UPDATE cluster_members SET layer_window = NULL WHERE cluster_id = ?",
+                        (cluster_id,),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE clusters SET distribution_reported = 1 WHERE cluster_id = ?",
+                        (cluster_id,),
+                    )
+                    for wid, count in layer_windows.items():
+                        self._conn.execute(
+                            "UPDATE cluster_members SET layer_window = ? "
+                            "WHERE cluster_id = ? AND worker_id = ?",
+                            (count, cluster_id, wid),
+                        )
+                    placeholders = ",".join("?" for _ in layer_windows)
+                    if placeholders:
+                        self._conn.execute(
+                            "UPDATE cluster_members SET layer_window = NULL "
+                            "WHERE cluster_id = ? AND layer_window IS NOT NULL "
+                            "AND worker_id NOT IN (%s)" % placeholders,
+                            (cluster_id, *layer_windows.keys()),
+                        )
+                    else:
+                        self._conn.execute(
+                            "UPDATE cluster_members SET layer_window = NULL "
+                            "WHERE cluster_id = ? AND layer_window IS NOT NULL",
+                            (cluster_id,),
+                        )
+                # Re-read and evaluate the gate on fresh state.
+                cluster = _load_cluster_members(self._conn, cluster_id)
+                all_ready = len(cluster.ready) >= len(cluster.members)
+                reported = cluster.layer_windows is not None
+                if all_ready and reported and cluster.status != ClusterStatus.terminated:
+                    self._conn.execute(
+                        "UPDATE clusters SET status = 'live' WHERE cluster_id = ?",
+                        (cluster_id,),
+                    )
+                    cluster.status = ClusterStatus.live
+                return cluster
 
     def list_clusters(self) -> list[ClusterRecord]:
-        rows = self._fetch_all("SELECT * FROM clusters")
-        return [_row_to_cluster(r) for r in rows]
+        with self._lock:
+            clusters: list[ClusterRecord] = []
+            rows = self._conn.execute("SELECT cluster_id FROM clusters ORDER BY created_at").fetchall()
+            for row in rows:
+                c = _load_cluster_members(self._conn, row["cluster_id"])
+                if c is not None:
+                    clusters.append(c)
+            return clusters

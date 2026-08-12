@@ -199,7 +199,8 @@ def test_cluster_layer_windows_persistence_roundtrip(tmp_path):
 
 def test_migrate_existing_db_adds_cluster_layer_windows(tmp_path):
     """A pre-existing clusters table (without layer_windows_json) must be
-    upgraded in place so the server doesn't crash on `no such column`."""
+    upgraded in place so the server doesn't crash on `no such column`, and its
+    membership JSON must be lifted into the cluster_members junction table."""
     import sqlite3
 
     db = str(tmp_path / "store.db")
@@ -212,7 +213,8 @@ def test_migrate_existing_db_adds_cluster_layer_windows(tmp_path):
         """
     )
     conn.execute(
-        "INSERT INTO clusters VALUES ('clu_1','m','10.0.0.0/24','assembling',1.0,'[]','[]','{}')"
+        "INSERT INTO clusters VALUES ('clu_1','m','10.0.0.0/24','assembling',1.0,"
+        "'[\"wrk_1\"]','[]','{\"wrk_1\":\"10.0.0.1\"}')"
     )
     conn.commit()
     conn.close()
@@ -220,8 +222,11 @@ def test_migrate_existing_db_adds_cluster_layer_windows(tmp_path):
     s = Store(path=db)
     c = s.get_cluster("clu_1")
     assert c is not None
+    # Membership lifted into the junction table: the member + its IP survive.
+    assert c.members == ["wrk_1"]
+    assert c.ips == {"wrk_1": "10.0.0.1"}
     assert c.layer_windows is None
-    # The new column is writable after migration.
+    # The new column is writable after migration (member row exists now).
     assert s.set_cluster_layer_windows("clu_1", {"wrk_1": 24}) is True
     assert s.get_cluster("clu_1").layer_windows == {"wrk_1": 24}
     s.close()
@@ -508,3 +513,242 @@ def test_legacy_json_path_redirects_to_db(tmp_path):
     assert s._path.endswith(".db")
     assert os.path.exists(s._path)
     s.close()
+
+
+def test_worker_can_be_member_of_multiple_clusters(tmp_path):
+    """Membership is many-to-many over time: a worker belongs to its current
+    cluster AND every terminated cluster it previously served in. The junction
+    table (composite PK) holds one row per (cluster, worker), so history
+    survives while the worker's own row only points at the current cluster."""
+    s = Store(path=str(tmp_path / "store.db"))
+    # Two terminated clusters + one live cluster, all containing wrk_1.
+    for cid, status in (("clu_old_1", ClusterStatus.terminated),
+                        ("clu_old_2", ClusterStatus.terminated),
+                        ("clu_now", ClusterStatus.live)):
+        s.create_cluster(
+            ClusterRecord(
+                cluster_id=cid,
+                model="demo-model",
+                subnet=f"10.23.1.{0}/24",
+                members=["wrk_1", "wrk_2"],
+                ips={"wrk_1": "10.23.1.1", "wrk_2": "10.23.1.2"},
+                status=status,
+                layer_windows={"wrk_1": 1, "wrk_2": 35} if status == ClusterStatus.live else None,
+            )
+        )
+    # The worker row points at ONE (current) cluster.
+    # (No workers table rows needed — cluster_members.worker_id is not an FK.)
+
+    # Every cluster still knows its own membership history.
+    assert s.get_cluster("clu_old_1").members == ["wrk_1", "wrk_2"]
+    assert s.get_cluster("clu_old_2").members == ["wrk_1", "wrk_2"]
+    assert s.get_cluster("clu_now").members == ["wrk_1", "wrk_2"]
+
+    # And the cluster's own layer windows are snapshotted per cluster.
+    assert s.get_cluster("clu_now").layer_windows == {"wrk_1": 1, "wrk_2": 35}
+    assert s.get_cluster("clu_old_1").layer_windows is None
+
+
+def test_membership_history_survives_worker_revocation(tmp_path):
+    """Revoking a worker (DELETE workers row) must NOT erase its rows from the
+    cluster_members junction — terminated clusters keep their membership for
+    accounting (who processed what). cluster_members.worker_id has no FK for
+    exactly this reason."""
+    import sqlite3
+
+    s = Store(path=str(tmp_path / "store.db"))
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["wrk_1", "wrk_2"],
+        ips={"wrk_1": "10.23.1.1", "wrk_2": "10.23.1.2"},
+        status=ClusterStatus.terminated,
+    )
+    s.create_cluster(clu)
+
+    # A worker row that references this cluster must exist for the FK check.
+    acc = s.create_account("alice", "hunter2hunter2")
+    w = _worker(acc.account_id, "wrk_1", "pub-a")
+    w.cluster_id = "clu_1"
+    s.create_worker(w)
+
+    # Revoking the worker deletes its row (this is what the API does).
+    assert s.delete_worker("wrk_1") is True
+
+    # The terminated cluster's membership must be INTACT — wrk_1 is still a
+    # member (no FK cascade) so "who was in this cluster" survives.
+    c = s.get_cluster("clu_1")
+    assert c is not None
+    assert c.members == ["wrk_1", "wrk_2"]
+    assert c.ips == {"wrk_1": "10.23.1.1", "wrk_2": "10.23.1.2"}
+
+    # But the FK on workers.cluster_id means the worker row itself is gone.
+    assert s.get_worker("wrk_1") is None
+
+
+def test_zero_layer_window_forwarder_preserved(tmp_path):
+    """A member credited with 0 layers (a forwarder) must survive the
+    round-trip: layer_window=0 is a VALID value, not 'missing'."""
+    s = Store(path=str(tmp_path / "store.db"))
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["wrk_head", "wrk_fwd"],
+        ips={"wrk_head": "10.23.1.1", "wrk_fwd": "10.23.1.2"},
+        status=ClusterStatus.live,
+        layer_windows={"wrk_head": 24, "wrk_fwd": 0},
+    )
+    s.create_cluster(clu)
+    c = s.get_cluster("clu_1")
+    assert c is not None
+    assert c.layer_windows == {"wrk_head": 24, "wrk_fwd": 0}
+
+
+def test_membership_migration_is_idempotent(tmp_path):
+    """Reopening a migrated DB (already in v0.6 shape) must NOT re-run the
+    JSON→junction population (the JSON columns are gone) and must not crash."""
+    import sqlite3
+
+    db = str(tmp_path / "store.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE clusters (cluster_id TEXT PRIMARY KEY, model TEXT NOT NULL,
+            subnet TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
+            members_json TEXT NOT NULL, ready_json TEXT NOT NULL, ips_json TEXT NOT NULL);
+        """
+    )
+    conn.execute(
+        "INSERT INTO clusters VALUES ('clu_1','m','10.0.0.0/24','live',1.0,"
+        "'[\"wrk_1\"]','[\"wrk_1\"]','{\"wrk_1\":\"10.0.0.1\"}')"
+    )
+    conn.commit()
+    conn.close()
+
+    # First open: migrates (adds distribution_reported, lifts membership, drops
+    # the JSON columns).
+    s = Store(path=db)
+    c = s.get_cluster("clu_1")
+    assert c is not None
+    assert c.members == ["wrk_1"]
+    assert c.ready == {"wrk_1"}
+    assert c.layer_windows == {}
+    s.close()
+
+    # Second open: already in v0.6 shape → no crash, data intact.
+    s2 = Store(path=db)
+    c2 = s2.get_cluster("clu_1")
+    assert c2 is not None
+    assert c2.members == ["wrk_1"]
+    assert c2.ready == {"wrk_1"}
+    assert c2.layer_windows == {}
+    s2.close()
+
+
+def test_migrated_db_never_resurrects_json_columns(tmp_path):
+    """The migration must NOT re-add the dropped JSON columns on reopen.
+
+    Regression for a real bug: the v0.5 ALTER (add layer_windows_json) ran on
+    EVERY open — its guard only checked 'column absent', and v0.6 had dropped
+    it, so a fresh or already-migrated DB got layer_windows_json resurrected
+    on each reopen. The v0.5 step is now gated on members_json (the true
+    pre-v0.6 marker), so this can't happen.
+    """
+    import sqlite3
+
+    # Fresh DB.
+    db = str(tmp_path / "fresh.db")
+    s = Store(path=db)
+    cols = {r[1] for r in s._conn.execute("PRAGMA table_info(clusters)")}
+    assert "layer_windows_json" not in cols
+    assert "members_json" not in cols
+    assert "distribution_reported" in cols
+    s.close()
+
+    # Reopen of fresh DB — still no resurrection.
+    s2 = Store(path=db)
+    cols2 = {r[1] for r in s2._conn.execute("PRAGMA table_info(clusters)")}
+    assert "layer_windows_json" not in cols2
+    assert "members_json" not in cols2
+    s2.close()
+
+    # An old v0.5 DB migrates fully, and reopening it does NOT resurrect the
+    # JSON columns either.
+    db2 = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db2)
+    conn.executescript(
+        """
+        CREATE TABLE clusters (cluster_id TEXT PRIMARY KEY, model TEXT NOT NULL,
+            subnet TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
+            members_json TEXT NOT NULL, ready_json TEXT NOT NULL, ips_json TEXT NOT NULL,
+            layer_windows_json TEXT);
+        """
+    )
+    conn.execute(
+        "INSERT INTO clusters VALUES ('clu_1','m','10.0.0.0/24','live',1.0,"
+        "'[\"wrk_1\"]','[\"wrk_1\"]','{\"wrk_1\":\"10.0.0.1\"}','{\"wrk_1\": 5}')"
+    )
+    conn.commit()
+    conn.close()
+
+    s3 = Store(path=db2)
+    assert s3.get_cluster("clu_1").layer_windows == {"wrk_1": 5}
+    s3.close()
+    s4 = Store(path=db2)
+    cols4 = {r[1] for r in s4._conn.execute("PRAGMA table_info(clusters)")}
+    assert "layer_windows_json" not in cols4
+    assert "members_json" not in cols4
+    assert s4.get_cluster("clu_1").layer_windows == {"wrk_1": 5}
+    s4.close()
+
+
+def test_atomic_ready_gate_flips_live_under_lock(tmp_path):
+    """mark_member_ready atomically applies the ready bit AND the liveness
+    gate: when all members are ready and the distribution is reported, the
+    cluster flips to live in the same lock-protected operation."""
+    s = Store(path=str(tmp_path / "store.db"))
+    s.create_cluster(
+        ClusterRecord(
+            cluster_id="clu_1",
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=["w1", "w2"],
+            ips={"w1": "10.23.1.1", "w2": "10.23.1.2"},
+            layer_windows={"w1": 12, "w2": 12},  # distribution reported
+        )
+    )
+    # First ready: not all members ready yet → stays assembling.
+    c = s.mark_member_ready("clu_1", "w1")
+    assert c.status == ClusterStatus.assembling
+    # Second ready: gate satisfied → live.
+    c = s.mark_member_ready("clu_1", "w2")
+    assert c.status == ClusterStatus.live
+    assert c.ready == {"w1", "w2"}
+
+
+def test_atomic_ready_never_resurrects_terminated(tmp_path):
+    """A ready report racing a dissolve must never flip a terminated cluster
+    back to live (regression: the old read-modify-write could interleave)."""
+    s = Store(path=str(tmp_path / "store.db"))
+    s.create_cluster(
+        ClusterRecord(
+            cluster_id="clu_1",
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=["w1"],
+            ips={"w1": "10.23.1.1"},
+            layer_windows={"w1": 24},
+        )
+    )
+    s.mark_member_ready("clu_1", "w1")
+    assert s.get_cluster("clu_1").status == ClusterStatus.live
+    # Dissolve (terminate).
+    clu = s.get_cluster("clu_1")
+    clu.status = ClusterStatus.terminated
+    s.update_cluster(clu)
+    # A late ready report must be refused and leave the cluster terminated.
+    c = s.mark_member_ready("clu_1", "w1")
+    assert c.status == ClusterStatus.terminated
+    assert s.get_cluster("clu_1").status == ClusterStatus.terminated

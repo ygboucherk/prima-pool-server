@@ -265,34 +265,17 @@ class Scheduler:
             if cluster:
                 self._dissolve_cluster(cluster, "member_left")
 
-    def _maybe_go_live(self, cluster: ClusterRecord) -> bool:
-        """A cluster is live when ALL members reported ready AND the head has
-        reported the layer distribution (a live cluster always carries one).
-
-        The distribution is 'reported' even when the head's parse failed
-        (layer_windows={} records 'unknown'), so a parse failure can never
-        block availability — it only marks the accounting data as unknown.
-
-        Never resurrects a TERMINATED cluster: a late ready/distribution frame
-        racing a dissolve must not flip a dissolved cluster back to live.
-        """
-        if cluster.status == ClusterStatus.terminated:
-            return False
-        all_members_ready = len(cluster.ready) >= len(cluster.members)
-        distribution_reported = cluster.layer_windows is not None
-        if all_members_ready and distribution_reported:
-            cluster.status = ClusterStatus.live
-            return True
-        return False
-
     def on_ready(self, cluster_id: str, worker_id: str) -> ClusterStatus:
-        """Record a member's readiness. Returns the cluster status."""
-        cluster = self.store.get_cluster(cluster_id)
+        """Record a member's readiness. Returns the cluster status.
+
+        Delegates to the store's atomic `mark_member_ready` so the ready-set
+        update and the liveness gate run under the RLock — two concurrent
+        ready reports can't lose each other, and a dissolve racing a ready
+        report can't resurrect a terminated cluster (the gate refuses it).
+        """
+        cluster = self.store.mark_member_ready(cluster_id, worker_id)
         if cluster is None:
             raise KeyError(cluster_id)
-        cluster.ready.add(worker_id)
-        self._maybe_go_live(cluster)
-        self.store.update_cluster(cluster)
         return cluster.status
 
     def on_layer_distribution(self, cluster_id: str, layer_windows: dict[str, int] | None) -> ClusterStatus:
@@ -302,11 +285,11 @@ class Scheduler:
         An EMPTY dict ({}) is the 'reported unknown' marker (parse failure) and
         must still satisfy the liveness gate — only None ('not reported')
         blocks it. Returns the cluster status.
+
+        Delegates to the store's atomic `set_cluster_distribution` (same
+        race-free read-modify-write under the RLock as `mark_member_ready`).
         """
-        cluster = self.store.get_cluster(cluster_id)
+        cluster = self.store.set_cluster_distribution(cluster_id, layer_windows)
         if cluster is None:
             raise KeyError(cluster_id)
-        cluster.layer_windows = layer_windows
-        self._maybe_go_live(cluster)
-        self.store.update_cluster(cluster)
         return cluster.status
