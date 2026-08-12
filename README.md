@@ -181,6 +181,12 @@ The worker-stats endpoint returns per-window `{model: {total_tokens: [prompt,
 completion], effective_tokens: [prompt, completion]}}`. All three reject other
 accounts and worker-scoped keys (403).
 
+> **Note:** deleting a worker (`DELETE /v1/workers/{id}`) hard-deletes its row,
+> so its historical worker-attributed entries disappear from these endpoints.
+> This is accepted for now (deletion is an explicit, permanent decommission;
+> normal shutdown is transient offline). The account-level `/usage/*` endpoints
+> are unaffected.
+
 ## Configuration
 
 All settings are read from `PRIMA_POOL_*` environment variables. See

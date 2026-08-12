@@ -83,6 +83,18 @@ was needed: the data comes from joining `requests → cluster_members → worker
 (the junction table already carries `layer_window` per member, and clusters are
 soft-deleted so history survives).
 
+> **Known limitation: deleting a worker erases its worker-attributed history.**
+> The worker-attributed queries join through the `workers` table
+> (`JOIN workers w ON w.worker_id = cm.worker_id`). `DELETE /v1/workers/{id}`
+> hard-deletes the worker row, so after a worker is revoked its historical
+> attribution rows disappear from `/worker-logs`, `/worker-logs/latest`, and
+> `/worker-stats`. This is accepted for now (a worker is only deleted by an
+> explicit, permanent decommission — normal shutdown is transient offline, not
+> deletion). The account-level `/usage/*` endpoints are unaffected, since they
+> key off `requests.account_id` rather than the worker row. A future soft-delete
+> (marking workers `revoked` instead of removing the row) would preserve this
+> history.
+
 ## 1. The unit: token·layer
 
 The economic unit proposed in the README is **token·layer**: a request that generates $T$ tokens

@@ -574,7 +574,9 @@ paths:
         served by a cluster appears once per worker the account owns in that
         cluster, with that worker's layer share and effective (share-scaled)
         token counts. `share`/`effective_*` are null when the cluster's layer
-        distribution is unknown.
+        distribution is unknown. Note: deleting a worker hard-deletes its row,
+        so its historical entries disappear from this endpoint (accepted for
+        now; the account-level /usage/* endpoints are unaffected).
       security:
         - apiKeyAuth: []
         - sessionAuth: []
@@ -1130,11 +1132,12 @@ components:
 
     WorkerLogEntry:
       type: object
-      required: [request_id, worker_id, model, prompt_tokens, completion_tokens, created_at]
+      required: [request_id, worker_id, model, cluster_id, prompt_tokens, completion_tokens, created_at]
       properties:
         request_id: { type: string }
         worker_id: { type: string }
         model: { type: string }
+        cluster_id: { type: string }
         prompt_tokens: { type: integer }
         completion_tokens: { type: integer }
         share:
