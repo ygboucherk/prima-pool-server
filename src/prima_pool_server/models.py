@@ -83,9 +83,15 @@ class RegisterWorkerRequest(BaseModel):
 
 
 class ReportReadyRequest(BaseModel):
-    """Empty body; the caller is identified by the worker-scoped API key."""
+    """Readiness report. The caller is identified by the worker-scoped API key.
 
-    pass
+    `layer_windows` (rank-keyed: rank -> layer count) is OPTIONAL and only
+    meaningful from the head (rank 0): it carries the Halda allocation so the
+    server can record it even if the WS distribution frame was lost. Workers
+    leave it unset.
+    """
+
+    layer_windows: dict[str, int] | None = None
 
 
 # ── Response schemas ─────────────────────────────────────────────────────
@@ -291,6 +297,13 @@ class ClusterRecord:
     created_at: float = field(default_factory=time.time)
     # worker_id -> assigned private IP
     ips: dict[str, str] = field(default_factory=dict)
+    # worker_id -> number of model layers assigned by prima.cpp (Halda) at
+    # cluster formation. Reported by the head once its process is ready:
+    #   - world > 1: parsed from the head's stdout "Allocation Strategy" table
+    #   - world == 1: the head reports it handles all layers (100% of the work)
+    # `None` means the head has not reported a distribution yet (required for
+    # the cluster to go live, so a live cluster always carries one).
+    layer_windows: dict[str, int] | None = None
 
 
 @dataclass

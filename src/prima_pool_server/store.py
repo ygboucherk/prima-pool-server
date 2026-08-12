@@ -10,10 +10,11 @@ Schema:
           cluster_id FK, last_heartbeat, assignable_at, created_at,
           wg_pubkey, endpoint_json, hardware_json, assigned_ip, ring_position)
   clusters(id, model, subnet, status, created_at,
-           members_json, ready_json, ips_json)
+           members_json, ready_json, ips_json, layer_windows_json)
 
 JSON columns hold the structured fields (endpoint/hardware, member order,
-ready set, ip map); scalar columns provide relational queries and integrity.
+ready set, ip map, layer distribution); scalar columns provide relational
+queries and integrity.
 """
 from __future__ import annotations
 
@@ -70,7 +71,8 @@ CREATE TABLE IF NOT EXISTS clusters (
     created_at REAL NOT NULL,
     members_json TEXT NOT NULL,
     ready_json   TEXT NOT NULL,
-    ips_json     TEXT NOT NULL
+    ips_json     TEXT NOT NULL,
+    layer_windows_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_clusters_model ON clusters(model);
 
@@ -167,10 +169,12 @@ def _cluster_to_row(c: ClusterRecord) -> dict:
         "members_json": json.dumps(c.members),
         "ready_json": json.dumps(sorted(c.ready)),
         "ips_json": json.dumps(c.ips),
+        "layer_windows_json": json.dumps(c.layer_windows) if c.layer_windows is not None else None,
     }
 
 
 def _row_to_cluster(row: sqlite3.Row) -> ClusterRecord:
+    lw = row["layer_windows_json"]
     return ClusterRecord(
         cluster_id=row["cluster_id"],
         model=row["model"],
@@ -180,6 +184,7 @@ def _row_to_cluster(row: sqlite3.Row) -> ClusterRecord:
         members=json.loads(row["members_json"]),
         ready=set(json.loads(row["ready_json"])),
         ips=json.loads(row["ips_json"]),
+        layer_windows=json.loads(lw) if lw not in (None, "null") else None,
     )
 
 
@@ -294,6 +299,15 @@ class Store:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_api_keys_worker ON api_keys(worker_id)"
         )
+        # v0.5: clusters.layer_windows_json stores the per-worker layer
+        # distribution reported by the head (Halda). `CREATE TABLE IF NOT
+        # EXISTS` won't add the column to pre-existing DBs, so ALTER it here.
+        ccols = {r[1] for r in self._conn.execute("PRAGMA table_info(clusters)")}
+        if "layer_windows_json" not in ccols:
+            self._conn.execute(
+                "ALTER TABLE clusters ADD COLUMN layer_windows_json TEXT"
+            )
+            logger.info("migrated clusters: added column layer_windows_json")
 
     # ── legacy migration ─────────────────────────────────────────────────
     def _find_legacy_json(self, db_path: str) -> str | None:
@@ -352,9 +366,9 @@ class Store:
                 clu = _cluster_from_legacy_dict(c)
                 conn.execute(
                     "INSERT OR IGNORE INTO clusters (cluster_id, model, subnet, status, created_at, "
-                    "members_json, ready_json, ips_json) "
+                    "members_json, ready_json, ips_json, layer_windows_json) "
                     "VALUES (:cluster_id, :model, :subnet, :status, :created_at, "
-                    ":members_json, :ready_json, :ips_json)",
+                    ":members_json, :ready_json, :ips_json, :layer_windows_json)",
                     _cluster_to_row(clu),
                 )
             for w in data.get("workers", []):
@@ -593,9 +607,9 @@ class Store:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO clusters (cluster_id, model, subnet, status, created_at, "
-                    "members_json, ready_json, ips_json) "
+                    "members_json, ready_json, ips_json, layer_windows_json) "
                     "VALUES (:cluster_id, :model, :subnet, :status, :created_at, "
-                    ":members_json, :ready_json, :ips_json)",
+                    ":members_json, :ready_json, :ips_json, :layer_windows_json)",
                     _cluster_to_row(rec),
                 )
 
@@ -603,13 +617,30 @@ class Store:
         row = self._fetch_one("SELECT * FROM clusters WHERE cluster_id = ?", (cluster_id,))
         return _row_to_cluster(row) if row else None
 
+    def set_cluster_layer_windows(self, cluster_id: str, layer_windows: dict[str, int] | None) -> bool:
+        """Record the head-reported per-worker layer distribution.
+
+        Returns True if the cluster exists (and the value was persisted).
+        A value of None records "unknown" (parse failure) — the field is then
+        present-but-empty on the row, so a live cluster never has a missing
+        distribution entry.
+        """
+        with self._lock:
+            with self._conn:
+                cur = self._conn.execute(
+                    "UPDATE clusters SET layer_windows_json = ? WHERE cluster_id = ?",
+                    (json.dumps(layer_windows) if layer_windows is not None else "null", cluster_id),
+                )
+                return cur.rowcount > 0
+
     def update_cluster(self, rec: ClusterRecord) -> None:
         with self._lock:
             with self._conn:
                 self._conn.execute(
                     "UPDATE clusters SET model=:model, subnet=:subnet, status=:status, "
                     "created_at=:created_at, members_json=:members_json, ready_json=:ready_json, "
-                    "ips_json=:ips_json WHERE cluster_id=:cluster_id",
+                    "ips_json=:ips_json, layer_windows_json=:layer_windows_json "
+                    "WHERE cluster_id=:cluster_id",
                     _cluster_to_row(rec),
                 )
 

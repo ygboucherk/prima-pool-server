@@ -171,6 +171,62 @@ def test_cluster_persistence_roundtrip(tmp_path):
     assert c.members == ["wrk_1", "wrk_2"]
 
 
+def test_cluster_layer_windows_persistence_roundtrip(tmp_path):
+    """The head-reported layer distribution persists across store reopens."""
+    path = str(tmp_path / "store.db")
+    s = Store(path=path)
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["wrk_1", "wrk_2"],
+        ips={"wrk_1": "10.23.1.1", "wrk_2": "10.23.1.2"},
+    )
+    s.create_cluster(clu)
+    assert s.set_cluster_layer_windows("clu_1", {"wrk_1": 24, "wrk_2": 24}) is True
+
+    s2 = Store(path=path)
+    c = s2.get_cluster("clu_1")
+    assert c is not None
+    assert c.layer_windows == {"wrk_1": 24, "wrk_2": 24}
+
+    # Unknown (None) is recorded as present-but-empty, not missing.
+    assert s2.set_cluster_layer_windows("clu_1", None) is True
+    c2 = s2.get_cluster("clu_1")
+    assert c2 is not None
+    assert c2.layer_windows is None
+
+
+def test_migrate_existing_db_adds_cluster_layer_windows(tmp_path):
+    """A pre-existing clusters table (without layer_windows_json) must be
+    upgraded in place so the server doesn't crash on `no such column`."""
+    import sqlite3
+
+    db = str(tmp_path / "store.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE clusters (cluster_id TEXT PRIMARY KEY, model TEXT NOT NULL,
+            subnet TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
+            members_json TEXT NOT NULL, ready_json TEXT NOT NULL, ips_json TEXT NOT NULL);
+        """
+    )
+    conn.execute(
+        "INSERT INTO clusters VALUES ('clu_1','m','10.0.0.0/24','assembling',1.0,'[]','[]','{}')"
+    )
+    conn.commit()
+    conn.close()
+
+    s = Store(path=db)
+    c = s.get_cluster("clu_1")
+    assert c is not None
+    assert c.layer_windows is None
+    # The new column is writable after migration.
+    assert s.set_cluster_layer_windows("clu_1", {"wrk_1": 24}) is True
+    assert s.get_cluster("clu_1").layer_windows == {"wrk_1": 24}
+    s.close()
+
+
 def test_request_recording_roundtrip(tmp_path):
     path = str(tmp_path / "store.db")
     s = Store(path=path)

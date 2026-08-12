@@ -265,13 +265,42 @@ class Scheduler:
             if cluster:
                 self._dissolve_cluster(cluster, "member_left")
 
+    def _maybe_go_live(self, cluster: ClusterRecord) -> bool:
+        """A cluster is live when ALL members reported ready AND the head has
+        reported the layer distribution (a live cluster always carries one).
+
+        The distribution is 'reported' even when the head's parse failed
+        (layer_windows={} records 'unknown'), so a parse failure can never
+        block availability — it only marks the accounting data as unknown.
+        """
+        all_members_ready = len(cluster.ready) >= len(cluster.members)
+        distribution_reported = cluster.layer_windows is not None
+        if all_members_ready and distribution_reported:
+            cluster.status = ClusterStatus.live
+            return True
+        return False
+
     def on_ready(self, cluster_id: str, worker_id: str) -> ClusterStatus:
         """Record a member's readiness. Returns the cluster status."""
         cluster = self.store.get_cluster(cluster_id)
         if cluster is None:
             raise KeyError(cluster_id)
         cluster.ready.add(worker_id)
-        if len(cluster.ready) >= len(cluster.members):
-            cluster.status = ClusterStatus.live
+        self._maybe_go_live(cluster)
+        self.store.update_cluster(cluster)
+        return cluster.status
+
+    def on_layer_distribution(self, cluster_id: str, layer_windows: dict[str, int] | None) -> ClusterStatus:
+        """Record the head's layer-distribution report.
+
+        Only the head (rank 0 / ring_position 0) is expected to send this.
+        `layer_windows=None` records an explicit 'unknown' so liveness is not
+        blocked by a failed stdout parse. Returns the cluster status.
+        """
+        cluster = self.store.get_cluster(cluster_id)
+        if cluster is None:
+            raise KeyError(cluster_id)
+        cluster.layer_windows = layer_windows
+        self._maybe_go_live(cluster)
         self.store.update_cluster(cluster)
         return cluster.status

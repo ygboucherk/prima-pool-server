@@ -1,6 +1,7 @@
 """FastAPI application: REST + WebSocket control plane endpoints."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -538,6 +539,24 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         # attributed every report to the SAME worker, so the cluster never
         # went live. The key's bound worker fixes this.
         worker = _bound_worker(authorization, cluster_id)
+        # If the head carries its rank-keyed layer distribution in the body
+        # (WS fallback / primary), record it BEFORE marking readiness so the
+        # liveness gate can be satisfied atomically.
+        if body.layer_windows and worker.ring_position == 0:
+            lw = {k: v for k, v in body.layer_windows.items() if isinstance(v, int) and v >= 0}
+            try:
+                # Map rank -> worker_id (members are in ring order).
+                by_worker: dict[str, int] = {}
+                for rank, count in lw.items():
+                    try:
+                        idx = int(rank)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= idx < len(cluster.members):
+                        by_worker[cluster.members[idx]] = count
+                scheduler.on_layer_distribution(cluster_id, by_worker or None)
+            except KeyError:
+                pass
         status = scheduler.on_ready(cluster_id, worker.worker_id)
         # on_ready mutates its own in-memory ClusterRecord; re-read so the
         # response reflects the updated ready set (the first read above is a
@@ -788,6 +807,61 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return result
 
     # ── WebSocket ────────────────────────────────────────────────────────
+    async def _handle_ws_frame(frame: dict, worker_id: str) -> None:
+        """Handle a client-originated WS frame.
+
+        Only `layer_distribution` is currently supported: the head reports the
+        per-worker layer windows (Halda) once its prima.cpp is ready. It is
+        accepted ONLY from the head (ring_position 0) — workers cannot report
+        a distribution.
+
+        The client sends the distribution keyed by RANK (Device Index, which
+        is the ring position). The server maps rank -> worker_id using the
+        cluster's member order (members[rank] == worker_id), so it can store
+        the distribution keyed by worker_id for accounting.
+        """
+        ftype = frame.get("type")
+        if ftype != "layer_distribution":
+            return
+        w = store.get_worker(worker_id)
+        if w is None or w.cluster_id is None:
+            return
+        if w.ring_position != 0:
+            logger.warning("ignoring layer_distribution from non-head worker %s", worker_id)
+            return
+        cluster_id = frame.get("cluster_id")
+        if cluster_id != w.cluster_id:
+            return
+        lw = frame.get("layer_windows")
+        if lw is not None and not isinstance(lw, dict):
+            logger.warning("malformed layer_windows from %s; recording unknown", worker_id)
+            lw = None
+        elif lw is not None:
+            # Normalize: only ints, drop anything else.
+            lw = {k: v for k, v in lw.items() if isinstance(k, str) and isinstance(v, int) and v >= 0}
+        try:
+            cluster = store.get_cluster(cluster_id)
+            if cluster is None:
+                return
+            # Map rank -> worker_id (members are in ring order; rank == index).
+            by_worker: dict[str, int] = {}
+            for rank, count in (lw or {}).items():
+                try:
+                    idx = int(rank)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < len(cluster.members):
+                    by_worker[cluster.members[idx]] = count
+            status = scheduler.on_layer_distribution(cluster_id, by_worker or None)
+            logger.info(
+                "recorded layer distribution for cluster %s from head %s (%s)",
+                cluster_id, worker_id, by_worker or None,
+            )
+            if status == ClusterStatus.live:
+                logger.info("cluster %s is now live", cluster_id)
+        except KeyError:
+            logger.warning("layer_distribution for unknown cluster %s from %s", cluster_id, worker_id)
+
     @app.websocket("/v1/workers/{worker_id}/events")
     async def worker_events(websocket: WebSocket, worker_id: str, api_key: str | None = None):
         # Auth via query param (per spec) or Authorization header.
@@ -825,6 +899,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 msg = await websocket.receive_text()
                 if msg == "ping":
                     await websocket.send_json({"type": "pong"})
+                else:
+                    try:
+                        frame = json.loads(msg)
+                    except ValueError:
+                        continue
+                    await _handle_ws_frame(frame, worker_id)
         except WebSocketDisconnect:
             pass
         finally:

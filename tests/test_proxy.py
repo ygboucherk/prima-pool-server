@@ -200,7 +200,7 @@ def test_proxy_streaming_survives_abrupt_upstream_close(client: TestClient, monk
         # The cluster only goes LIVE when both members report ready.
         st1 = c.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
         cluster_id = st1["cluster"]["cluster_id"]
-        c.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+        c.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
         c.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
 
         user_key = _new_user(c)
@@ -290,7 +290,7 @@ def _live_cluster(client: TestClient):
     client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     cluster_id = st1["cluster"]["cluster_id"]
-    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     user_key = _new_user(client)
     return user_key, cluster_id

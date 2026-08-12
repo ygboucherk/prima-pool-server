@@ -310,8 +310,9 @@ def test_same_account_two_workers_same_cluster_both_ready(client: TestClient):
     assert cfg1.json()["interface"]["private_ip"] == st1["cluster"]["assigned_ip"]
     assert cfg2.json()["interface"]["private_ip"] == st2["cluster"]["assigned_ip"]
 
-    # Both report ready → live (each with its own key).
-    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    # Both report ready → live (each with its own key). The head (key1)
+    # carries the layer distribution, required for the cluster to go live.
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     assert r1.status_code == 202 and r1.json()["status"] == "assembling", r1.text
     r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     assert r2.status_code == 202, r2.text
@@ -361,7 +362,7 @@ def test_unbound_keys_self_heal_on_heartbeat(client: TestClient, store: Store):
     assert cfg2.status_code == 200, cfg2.text
 
     # Both report ready → live.
-    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     assert r2.json()["status"] == "live", r2.text
     assert r2.json()["members_ready"] == 2
@@ -379,7 +380,7 @@ def test_cluster_ready_and_live(client: TestClient):
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     cluster_id = st1["cluster"]["cluster_id"]
 
-    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     assert r1.status_code == 202
     assert r1.json()["status"] == "assembling"
     r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
