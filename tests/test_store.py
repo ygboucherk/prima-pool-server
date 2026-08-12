@@ -385,6 +385,156 @@ def test_request_survives_cluster_termination(tmp_path):
     assert s.get_cluster("clu_1").status == ClusterStatus.terminated
 
 
+def _worker_attribution_fixture(s: Store) -> tuple[str, str, str, str]:
+    """Create two accounts, two workers (alice owns wrk_a, bob owns wrk_b),
+    a live two-member cluster with a layer distribution, and one request.
+    Returns (alice_account_id, alice_key_id, wrk_a, wrk_b)."""
+    alice = s.create_account("alice", "hunter2hunter2")
+    bob = s.create_account("bob", "hunter2hunter2")
+    alice_key, _ = s.create_api_key(alice.account_id, "user", "user")
+    _ = s.create_api_key(bob.account_id, "user", "user")
+    wrk_a = "wrk_a"
+    wrk_b = "wrk_b"
+    assert s.create_worker_if_available(_worker(alice.account_id, wrk_a, "pub-a"), max_per_account=4)
+    assert s.create_worker_if_available(_worker(bob.account_id, wrk_b, "pub-b"), max_per_account=4)
+    clu = ClusterRecord(
+        cluster_id="clu_1",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=[wrk_a, wrk_b],
+        ips={wrk_a: "10.23.1.1", wrk_b: "10.23.1.2"},
+        status=ClusterStatus.live,
+        ready={wrk_a, wrk_b},
+        layer_windows={wrk_a: 20, wrk_b: 10},
+    )
+    s.create_cluster(clu)
+    return alice.account_id, alice_key.key_id, wrk_a, wrk_b
+
+
+def test_worker_attribution_share_and_effective(tmp_path):
+    """Attribution rows carry the worker's layer_window and the cluster-wide
+    total, so shares can be computed (alice owns one of two members)."""
+    s = Store(path=str(tmp_path / "store.db"))
+    acc_id, key_id, wrk_a, wrk_b = _worker_attribution_fixture(s)
+    s.record_request(
+        RequestRecord(
+            request_id="req_1",
+            account_id=acc_id,
+            key_id=key_id,
+            model="demo-model",
+            cluster_id="clu_1",
+            prompt_tokens=30,
+            completion_tokens=60,
+            created_at=100.0,
+        )
+    )
+    rows = s.worker_attribution(acc_id, 0.0, 1000.0)
+    # One row for alice's worker (wrk_a). bob's wrk_b is not alice's.
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["worker_id"] == wrk_a
+    assert row["layer_window"] == 20
+    assert row["cluster_total"] == 30  # 20 + 10 across ALL members
+    # share = 20/30, effective = 30*(2/3) = 20, 60*(2/3) = 40
+    assert row["prompt_tokens"] == 30
+    assert row["completion_tokens"] == 60
+
+
+def test_worker_attribution_worker_ids_filter_intersects_owned(tmp_path):
+    """The worker_ids filter restricts to (requested ∩ owned) workers."""
+    s = Store(path=str(tmp_path / "store.db"))
+    acc_id, key_id, wrk_a, wrk_b = _worker_attribution_fixture(s)
+    s.record_request(
+        RequestRecord(
+            request_id="req_1",
+            account_id=acc_id,
+            key_id=key_id,
+            model="demo-model",
+            cluster_id="clu_1",
+            prompt_tokens=30,
+            completion_tokens=60,
+            created_at=100.0,
+        )
+    )
+    # Requesting bob's worker too: bob's worker is NOT owned by alice → still 1 row.
+    rows = s.worker_attribution(acc_id, 0.0, 1000.0, worker_ids=[wrk_a, wrk_b])
+    assert len(rows) == 1
+    assert rows[0]["worker_id"] == wrk_a
+    # Requesting a worker alice does not own → 0 rows.
+    rows = s.worker_attribution(acc_id, 0.0, 1000.0, worker_ids=[wrk_b])
+    assert rows == []
+
+
+def test_worker_attribution_unknown_distribution_null_windows(tmp_path):
+    """An unknown (not reported) distribution yields NULL layer_window and
+    NULL cluster_total, so the caller reports share/effective as None."""
+    s = Store(path=str(tmp_path / "store.db"))
+    acc_id, key_id, wrk_a, wrk_b = _worker_attribution_fixture(s)
+    # Overwrite the distribution with None (not reported).
+    s.set_cluster_layer_windows("clu_1", None)
+    s.record_request(
+        RequestRecord(
+            request_id="req_1",
+            account_id=acc_id,
+            key_id=key_id,
+            model="demo-model",
+            cluster_id="clu_1",
+            prompt_tokens=10,
+            completion_tokens=20,
+            created_at=100.0,
+        )
+    )
+    rows = s.worker_attribution(acc_id, 0.0, 1000.0)
+    assert len(rows) == 1
+    assert rows[0]["layer_window"] is None
+    assert rows[0]["cluster_total"] is None
+
+
+def test_worker_attribution_forwarder_zero_window(tmp_path):
+    """A forwarder (layer_window 0) is credited with 0 — the row is emitted
+    with window 0 so the share computes to 0.0, not None."""
+    s = Store(path=str(tmp_path / "store.db"))
+    acc_id, key_id, wrk_a, wrk_b = _worker_attribution_fixture(s)
+    # wrk_a becomes a forwarder: 0 layers.
+    s.set_cluster_layer_windows("clu_1", {wrk_a: 0, wrk_b: 10})
+    s.record_request(
+        RequestRecord(
+            request_id="req_1",
+            account_id=acc_id,
+            key_id=key_id,
+            model="demo-model",
+            cluster_id="clu_1",
+            prompt_tokens=10,
+            completion_tokens=20,
+            created_at=100.0,
+        )
+    )
+    rows = s.worker_attribution(acc_id, 0.0, 1000.0)
+    assert len(rows) == 1
+    assert rows[0]["layer_window"] == 0
+    assert rows[0]["cluster_total"] == 10
+
+
+def test_worker_logs_latest_orders_newest_first(tmp_path):
+    s = Store(path=str(tmp_path / "store.db"))
+    acc_id, key_id, wrk_a, wrk_b = _worker_attribution_fixture(s)
+    for i in range(3):
+        s.record_request(
+            RequestRecord(
+                request_id=f"req_{i}",
+                account_id=acc_id,
+                key_id=key_id,
+                model="demo-model",
+                cluster_id="clu_1",
+                prompt_tokens=i,
+                completion_tokens=i,
+                created_at=100.0 + i,
+            )
+        )
+    rows = s.worker_logs_latest(acc_id, limit=2)
+    assert [r["request_id"] for r in rows] == ["req_2", "req_1"]
+
+
 def test_account_and_key_persistence(tmp_path):
     path = str(tmp_path / "store.json")
     s = Store(path=path)

@@ -582,3 +582,294 @@ def test_parse_sse_usage_partial_counts():
         b'data: {"choices":[],"usage":{"completion_tokens":9}}\n\n'
     )
     assert _parse_sse_usage(body) == (7, 9)
+
+
+# ── worker-attributed usage endpoints ────────────────────────────────────
+def _register_account_full(client: TestClient, username: str):
+    """Register an account + login + issue a user key. Returns (acc, sess, user_key)."""
+    acc = client.post(
+        "/v1/accounts/register", json={"username": username, "password": "hunter2hunter2"}
+    ).json()
+    sess = client.post(
+        "/v1/accounts/login", json={"username": username, "password": "hunter2hunter2"}
+    ).json()
+    user_key = client.post(
+        f"/v1/accounts/{acc['account_id']}/keys",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"name": "user", "scope": "user"},
+    ).json()["api_key"]
+    return acc, sess, user_key
+
+
+def _register_worker_on_account(client: TestClient, acc: dict, sess: dict, wg_pubkey: str, memory_mb=2048):
+    """Create a worker-scoped key + register a worker for an EXISTING account."""
+    key = client.post(
+        f"/v1/accounts/{acc['account_id']}/keys",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"name": "worker", "scope": "worker"},
+    ).json()["api_key"]
+    worker = client.post(
+        "/v1/workers/register",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "demo-model",
+            "gguf_sha256": "a" * 64,
+            "memory_allocated_mb": memory_mb,
+            "wg_pubkey": wg_pubkey,
+            "endpoint": {"host": "203.0.113.10", "port": 51820, "behind_nat": False, "nat_type": "none"},
+        },
+    ).json()
+    return key, worker
+
+
+def _attribution_fixture(client: TestClient, store: Store, username="alice", wg_pubkey="pubkey1"):
+    """Create an account owning both a user key and one worker. Returns
+    (user_key, account_id, key_id, worker)."""
+    acc, sess, user_key = _register_account_full(client, username)
+    account_id = acc["account_id"]
+    key_id = store.resolve_api_key(user_key).key_id
+    _worker_key, worker = _register_worker_on_account(client, acc, sess, wg_pubkey, memory_mb=2048)
+    return user_key, account_id, key_id, worker
+
+
+def test_worker_logs_endpoint_share_and_effective(client: TestClient, store: Store):
+    """One owned worker in a 2-worker cluster with distribution {w1:20, w2:10}.
+    The user's worker gets share 2/3; the other account's worker row is absent."""
+    from prima_pool_server.models import ClusterRecord, ClusterStatus
+
+    user_key, account_id, key_id, worker = _attribution_fixture(client, store)
+    # Create a second account whose worker is the other cluster member.
+    other_acc, other_sess, _ = _register_account_full(client, "bob")
+    other_worker = _register_worker_on_account(client, other_acc, other_sess, "pubkey2", memory_mb=2048)[1]
+    cluster_id = "clu_w1"
+    store.create_cluster(
+        ClusterRecord(
+            cluster_id=cluster_id,
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=[worker["worker_id"], other_worker["worker_id"]],
+            ips={worker["worker_id"]: "10.23.1.1", other_worker["worker_id"]: "10.23.1.2"},
+            status=ClusterStatus.live,
+            ready={worker["worker_id"], other_worker["worker_id"]},
+            layer_windows={worker["worker_id"]: 20, other_worker["worker_id"]: 10},
+        )
+    )
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 30, 60, 100.0)
+    r = client.get(
+        f"/v1/accounts/{account_id}/worker-logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    logs = r.json()
+    # Only the user's worker appears (one row), with share 2/3.
+    assert len(logs) == 1
+    entry = logs[0]
+    assert entry["worker_id"] == worker["worker_id"]
+    assert entry["prompt_tokens"] == 30
+    assert entry["completion_tokens"] == 60
+    assert entry["share"] == pytest.approx(20 / 30)
+    assert entry["effective_prompt"] == pytest.approx(30 * 20 / 30)
+    assert entry["effective_completion"] == pytest.approx(60 * 20 / 30)
+
+
+def test_worker_logs_endpoint_unknown_distribution_nulls(client: TestClient, store: Store):
+    """With no distribution reported, share/effective are null (not 0)."""
+    from prima_pool_server.models import ClusterRecord, ClusterStatus
+
+    user_key, account_id, key_id, worker = _attribution_fixture(client, store)
+    cluster_id = "clu_w1"
+    store.create_cluster(
+        ClusterRecord(
+            cluster_id=cluster_id,
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=[worker["worker_id"]],
+            ips={worker["worker_id"]: "10.23.1.1"},
+            status=ClusterStatus.live,
+            ready={worker["worker_id"]},
+            layer_windows=None,
+        )
+    )
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 10, 20, 100.0)
+    r = client.get(
+        f"/v1/accounts/{account_id}/worker-logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    entry = r.json()[0]
+    assert entry["share"] is None
+    assert entry["effective_prompt"] is None
+    assert entry["effective_completion"] is None
+
+
+def test_worker_logs_endpoint_forwarder_zero(client: TestClient, store: Store):
+    """A forwarder (layer_window 0) is emitted with share 0.0 and effective 0.0."""
+    from prima_pool_server.models import ClusterRecord, ClusterStatus
+
+    user_key, account_id, key_id, worker = _attribution_fixture(client, store)
+    # Second member (another account) does all the layers; the user's worker
+    # is a forwarder with 0 layers.
+    other_acc, other_sess, _ = _register_account_full(client, "bob")
+    other_worker = _register_worker_on_account(client, other_acc, other_sess, "pubkey2", memory_mb=2048)[1]
+    cluster_id = "clu_w1"
+    store.create_cluster(
+        ClusterRecord(
+            cluster_id=cluster_id,
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=[worker["worker_id"], other_worker["worker_id"]],
+            ips={worker["worker_id"]: "10.23.1.1", other_worker["worker_id"]: "10.23.1.2"},
+            status=ClusterStatus.live,
+            ready={worker["worker_id"], other_worker["worker_id"]},
+            layer_windows={worker["worker_id"]: 0, other_worker["worker_id"]: 36},
+        )
+    )
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 10, 20, 100.0)
+    r = client.get(
+        f"/v1/accounts/{account_id}/worker-logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    entry = r.json()[0]
+    assert entry["share"] == 0.0
+    assert entry["effective_prompt"] == 0.0
+    assert entry["effective_completion"] == 0.0
+
+
+def test_worker_logs_latest_endpoint(client: TestClient, store: Store):
+    from prima_pool_server.models import ClusterRecord, ClusterStatus
+
+    user_key, account_id, key_id, worker = _attribution_fixture(client, store)
+    cluster_id = "clu_w1"
+    store.create_cluster(
+        ClusterRecord(
+            cluster_id=cluster_id,
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=[worker["worker_id"]],
+            ips={worker["worker_id"]: "10.23.1.1"},
+            status=ClusterStatus.live,
+            ready={worker["worker_id"]},
+            layer_windows={worker["worker_id"]: 36},
+        )
+    )
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 30, 40, 200.0)
+    r = client.get(
+        f"/v1/accounts/{account_id}/worker-logs/latest",
+        params={"limit": 1},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    logs = r.json()
+    assert len(logs) == 1
+    assert logs[0]["prompt_tokens"] == 30
+    assert logs[0]["effective_prompt"] == pytest.approx(30.0)
+
+
+def test_worker_stats_endpoint(client: TestClient, store: Store):
+    from prima_pool_server.models import ClusterRecord, ClusterStatus
+
+    user_key, account_id, key_id, worker = _attribution_fixture(client, store)
+    cluster_id = "clu_w1"
+    store.create_cluster(
+        ClusterRecord(
+            cluster_id=cluster_id,
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=[worker["worker_id"]],
+            ips={worker["worker_id"]: "10.23.1.1"},
+            status=ClusterStatus.live,
+            ready={worker["worker_id"]},
+            layer_windows={worker["worker_id"]: 36},
+        )
+    )
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 10, 20, 100.0)
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 30, 40, 200.0)
+    r = client.post(
+        f"/v1/accounts/{account_id}/worker-stats",
+        json={"windows": [[0, 1000]]},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    stats = r.json()
+    assert len(stats) == 1
+    assert stats[0]["demo-model"]["total_tokens"] == [40.0, 60.0]
+    assert stats[0]["demo-model"]["effective_tokens"] == pytest.approx([40.0, 60.0])
+
+
+def test_worker_stats_endpoint_worker_ids_filter(client: TestClient, store: Store):
+    from prima_pool_server.models import ClusterRecord, ClusterStatus
+
+    user_key, account_id, key_id, worker = _attribution_fixture(client, store)
+    # Add a second worker to the SAME account (alice).
+    alice_sess = client.post(
+        "/v1/accounts/login", json={"username": "alice", "password": "hunter2hunter2"}
+    ).json()
+    alice_acc_dict = {"account_id": account_id}
+    _, worker2 = _register_worker_on_account(client, alice_acc_dict, alice_sess, "pubkey3", memory_mb=2048)
+    cluster_id = "clu_w1"
+    store.create_cluster(
+        ClusterRecord(
+            cluster_id=cluster_id,
+            model="demo-model",
+            subnet="10.23.1.0/24",
+            members=[worker["worker_id"], worker2["worker_id"]],
+            ips={worker["worker_id"]: "10.23.1.1", worker2["worker_id"]: "10.23.1.2"},
+            status=ClusterStatus.live,
+            ready={worker["worker_id"], worker2["worker_id"]},
+            layer_windows={worker["worker_id"]: 30, worker2["worker_id"]: 10},
+        )
+    )
+    _record_usage(store, account_id, key_id, "demo-model", cluster_id, 40, 80, 100.0)
+    # Filter to the second worker only → total = its share of 40/80.
+    r = client.post(
+        f"/v1/accounts/{account_id}/worker-stats",
+        json={"windows": [[0, 1000]], "worker_ids": [worker2["worker_id"]]},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 200, r.text
+    stats = r.json()
+    assert stats[0]["demo-model"]["total_tokens"] == [40.0, 80.0]
+    assert stats[0]["demo-model"]["effective_tokens"] == pytest.approx([10.0, 20.0])
+
+
+def test_worker_logs_endpoint_requires_own_account(client: TestClient, store: Store):
+    user_key = _attribution_fixture(client, store)[0]
+    r = client.get(
+        "/v1/accounts/acc_other/worker-logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 403
+
+
+def test_worker_logs_endpoint_rejects_worker_key(client: TestClient, store: Store):
+    key, _ = _new_worker(client, "frank", "pubkey5")
+    r = client.get(
+        "/v1/accounts/acc_x/worker-logs",
+        params={"begin": 0, "end": 1000},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert r.status_code == 403
+
+
+def test_worker_logs_endpoint_validation(client: TestClient, store: Store):
+    user_key, account_id, _, _ = _attribution_fixture(client, store)
+    # begin >= end is rejected.
+    r = client.get(
+        f"/v1/accounts/{account_id}/worker-logs",
+        params={"begin": 1000, "end": 100},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 400
+    # limit 0 is rejected.
+    r = client.get(
+        f"/v1/accounts/{account_id}/worker-logs",
+        params={"begin": 0, "end": 1000, "limit": 0},
+        headers={"Authorization": f"Bearer {user_key}"},
+    )
+    assert r.status_code == 400

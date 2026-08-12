@@ -769,6 +769,67 @@ class Store:
             for r in rows
         }
 
+    def worker_attribution(
+        self,
+        account_id: str,
+        begin: float,
+        end: float,
+        worker_ids: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return per-request-per-worker attribution rows for an account's
+        workers in [begin, end), newest first.
+
+        Each row is one (request, owned-worker) pair: the request's token
+        counts, the worker's `layer_window`, and the cluster's `cluster_total`
+        (SUM of layer_window over ALL members of the request's cluster,
+        including workers of other accounts — clusters are multi-account).
+
+        `share`/`effective_*` are computed by the caller from
+        layer_window / cluster_total. `layer_window` is NULL when the cluster's
+        distribution is unknown or this worker is missing from the report;
+        `cluster_total` is NULL when no member has a window. If `worker_ids` is
+        given, only rows for (worker_ids ∩ owned workers) are returned.
+        """
+        sql = (
+            "SELECT r.request_id, r.model, r.prompt_tokens, r.completion_tokens, "
+            "       r.created_at, cm.worker_id, cm.layer_window, "
+            "       (SELECT SUM(cm2.layer_window) FROM cluster_members cm2 "
+            "         WHERE cm2.cluster_id = r.cluster_id) AS cluster_total "
+            "FROM requests r "
+            "JOIN cluster_members cm ON cm.cluster_id = r.cluster_id "
+            "JOIN workers w ON w.worker_id = cm.worker_id "
+            "WHERE w.account_id = ? AND r.created_at >= ? AND r.created_at < ? "
+        )
+        params: list = [account_id, begin, end]
+        if worker_ids:
+            placeholders = ",".join("?" for _ in worker_ids)
+            sql += f" AND cm.worker_id IN ({placeholders})"
+            params.extend(worker_ids)
+        sql += " ORDER BY r.created_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._fetch_all(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    def worker_logs_latest(self, account_id: str, limit: int = 100) -> list[dict]:
+        """Return the most recent per-request-per-worker attribution rows for
+        an account's workers, newest first (no time filter)."""
+        rows = self._fetch_all(
+            "SELECT r.request_id, r.model, r.prompt_tokens, r.completion_tokens, "
+            "       r.created_at, cm.worker_id, cm.layer_window, "
+            "       (SELECT SUM(cm2.layer_window) FROM cluster_members cm2 "
+            "         WHERE cm2.cluster_id = r.cluster_id) AS cluster_total "
+            "FROM requests r "
+            "JOIN cluster_members cm ON cm.cluster_id = r.cluster_id "
+            "JOIN workers w ON w.worker_id = cm.worker_id "
+            "WHERE w.account_id = ? "
+            "ORDER BY r.created_at DESC LIMIT ?",
+            (account_id, limit),
+        )
+        return [dict(r) for r in rows]
+
     # ── workers ──────────────────────────────────────────────────────────
     def create_worker(self, rec: WorkerRecord) -> None:
         with self._lock:

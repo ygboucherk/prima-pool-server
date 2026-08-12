@@ -29,7 +29,7 @@ Clusters are **soft-deleted** (marked `terminated`, not removed), so the
 cluster lifecycle — this is what will let the worker-crediting side later join
 `requests → clusters → members` to attribute work.
 
-Two account-scoped endpoints expose this (auth: user key OR session token):
+Three account-scoped endpoints expose this (auth: user key OR session token):
 
 - `GET /v1/accounts/{id}/usage/logs?begin=&end=&limit=` — the account's logs in
   `[begin, end)` (Unix seconds), newest first; `limit` caps the count (default 1000).
@@ -39,6 +39,49 @@ Two account-scoped endpoints expose this (auth: user key OR session token):
   — per-window `{model: {requests, prompt_tokens, completion_tokens}}`.
 
 All three reject other accounts and worker-scoped keys (403).
+
+### 0.1 Worker-attributed usage (v0)
+
+The user-side endpoints above attribute the **full** token count of each request
+to the account that made the call. A complementary set of **worker-attributed**
+endpoints answers the other question: *what did this account's machines
+contribute to serving requests?* Because a cluster can contain workers from
+several accounts, a single request is attributed to each worker the account
+owns in that cluster, scaled by that worker's layer share.
+
+For a request served by cluster $C$, a worker $w \in C$ owned by the account has:
+
+$$\text{share}(w) = \frac{\text{layer\_window}(w)}{\sum_{m \in C} \text{layer\_window}(m)}$$
+
+$$\text{effective\_prompt} = \text{prompt\_tokens} \times \text{share}(w), \qquad
+\text{effective\_completion} = \text{completion\_tokens} \times \text{share}(w)$$
+
+The denominator sums over **all** members of $C$ (including other accounts'
+workers), so the shares of all members sum to 1 and the effective tokens across
+all accounts sum to the request's true totals. `share`/`effective_*` are `null`
+when the cluster's layer distribution is unknown (no window reported); a
+forwarder (`layer_window = 0`) gets `share = 0.0` and `effective = 0.0`.
+
+Three endpoints expose this (auth: user key OR session token):
+
+- `GET /v1/accounts/{id}/worker-logs?begin=&end=&limit=` — per-request-per-worker
+  entries `{request_id, worker_id, model, prompt_tokens, completion_tokens,
+  share, effective_prompt, effective_completion, created_at}` in `[begin, end)`,
+  newest first. A request appears once per owned worker in its cluster.
+- `GET /v1/accounts/{id}/worker-logs/latest?limit=N` — the account's most recent
+  `N` worker-attributed entries, newest first (default 50).
+- `POST /v1/accounts/{id}/worker-stats` with
+  `{"windows": [[begin, end], ...], "worker_ids": [...]?}` — per-window
+  `{model: {total_tokens: [prompt, completion], effective_tokens: [prompt,
+  completion]}}`. `total_tokens` sums the request token counts over the
+  account's worker rows; `effective_tokens` sums the share-scaled counts. If
+  `worker_ids` is given, only rows for `(worker_ids ∩ owned workers)` are
+  included; omitted/empty means all owned workers.
+
+All three reject other accounts and worker-scoped keys (403). No schema change
+was needed: the data comes from joining `requests → cluster_members → workers`
+(the junction table already carries `layer_window` per member, and clusters are
+soft-deleted so history survives).
 
 ## 1. The unit: token·layer
 

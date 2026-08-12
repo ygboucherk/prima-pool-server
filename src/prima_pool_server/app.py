@@ -45,8 +45,10 @@ from .models import (
     UsageStatsRequest,
     Worker,
     WorkerInfo,
+    WorkerLogEntry,
     WorkerRecord,
     WorkerState,
+    WorkerStatsRequest,
     WorkerStatus,
 )
 from .router import ClusterRouter
@@ -61,6 +63,36 @@ logger = logging.getLogger(__name__)
 
 def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _attribution_entry(row: dict) -> WorkerLogEntry:
+    """Build a WorkerLogEntry from a store attribution row.
+
+    share = layer_window / cluster_total (over ALL cluster members).
+    None when the distribution is unknown (no window / no total).
+    Forwarders (layer_window 0) get share 0.0 and effective 0.0.
+    """
+    lw = row["layer_window"]
+    total = row["cluster_total"]
+    if lw is not None and total:
+        share = lw / total
+        effective_prompt = row["prompt_tokens"] * share
+        effective_completion = row["completion_tokens"] * share
+    else:
+        share = None
+        effective_prompt = None
+        effective_completion = None
+    return WorkerLogEntry(
+        request_id=row["request_id"],
+        worker_id=row["worker_id"],
+        model=row["model"],
+        prompt_tokens=row["prompt_tokens"],
+        completion_tokens=row["completion_tokens"],
+        share=share,
+        effective_prompt=effective_prompt,
+        effective_completion=effective_completion,
+        created_at=row["created_at"],
+    )
 
 
 def _parse_sse_usage(raw: bytes) -> tuple[int, int] | None:
@@ -861,6 +893,89 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                     for model, (reqs, prompt, completion) in stats.items()
                 }
             )
+        return result
+
+    # ── worker usage / logs (account-scoped, worker-attributed) ──────────
+    @app.get("/v1/accounts/{account_id}/worker-logs", response_model=list[WorkerLogEntry])
+    async def account_worker_logs(
+        account_id: str,
+        begin: float,
+        end: float,
+        limit: int = 1000,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's worker-attributed inference logs in [begin, end),
+        newest first.
+
+        Auth: user-scoped API key OR the account session token. Each request
+        served by a cluster appears once per worker the account owns in that
+        cluster, with that worker's layer share and effective tokens.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if begin >= end:
+            raise BadRequestError("'begin' must be before 'end'.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        rows = store.worker_attribution(account_id, begin, end, limit=limit)
+        return [_attribution_entry(r) for r in rows]
+
+    @app.get("/v1/accounts/{account_id}/worker-logs/latest", response_model=list[WorkerLogEntry])
+    async def account_worker_logs_latest(
+        account_id: str,
+        limit: int = 50,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's most recent `limit` worker-attributed logs,
+        newest first.
+
+        Auth: user-scoped API key OR the account session token.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        rows = store.worker_logs_latest(account_id, limit=limit)
+        return [_attribution_entry(r) for r in rows]
+
+    @app.post("/v1/accounts/{account_id}/worker-stats")
+    async def account_worker_stats(
+        account_id: str,
+        body: WorkerStatsRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Aggregate the account's worker-attributed usage over a list of
+        (begin, end) windows.
+
+        Auth: user-scoped API key OR the account session token. Returns one
+        entry per window: {model: {total_tokens: [prompt, completion],
+        effective_tokens: [prompt, completion]}}. `total_tokens` sums the
+        request token counts over the account's worker rows; `effective_tokens`
+        sums the share-scaled counts. If `worker_ids` is given, only rows for
+        (worker_ids ∩ owned workers) are included.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        result = []
+        for begin, end in body.windows:
+            if begin >= end:
+                raise BadRequestError("Each window's 'begin' must be before its 'end'.")
+            rows = store.worker_attribution(account_id, begin, end, worker_ids=body.worker_ids)
+            per_model: dict[str, dict] = {}
+            for r in rows:
+                entry = per_model.setdefault(
+                    r["model"],
+                    {"total_tokens": [0.0, 0.0], "effective_tokens": [0.0, 0.0]},
+                )
+                entry["total_tokens"][0] += r["prompt_tokens"]
+                entry["total_tokens"][1] += r["completion_tokens"]
+                lw = r["layer_window"]
+                total = r["cluster_total"]
+                if lw is not None and total:
+                    share = lw / total
+                    entry["effective_tokens"][0] += r["prompt_tokens"] * share
+                    entry["effective_tokens"][1] += r["completion_tokens"] * share
+            result.append(per_model)
         return result
 
     # ── WebSocket ────────────────────────────────────────────────────────

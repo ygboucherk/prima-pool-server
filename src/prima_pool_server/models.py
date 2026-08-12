@@ -263,6 +263,36 @@ class ModelUsage(BaseModel):
     completion_tokens: int
 
 
+class WorkerLogEntry(BaseModel):
+    """A single inference request attributed to one of the account's workers.
+
+    A request served by a cluster appears once per worker the account owns in
+    that cluster. `share` is the worker's layer share (layer_window / total
+    layers across the whole cluster); `effective_*` = token count * share.
+    `share`/`effective_*` are None when the cluster's layer distribution is
+    unknown (or this worker's window is missing from the report). A forwarder
+    (layer_window 0) has share 0.0 and effective 0.0.
+    """
+
+    request_id: str
+    worker_id: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    share: float | None
+    effective_prompt: float | None
+    effective_completion: float | None
+    created_at: float
+
+
+class WorkerStatsRequest(BaseModel):
+    """A list of (begin, end) windows to aggregate worker usage over, with an
+    optional worker_id filter (intersected with the account's owned workers)."""
+
+    windows: list[tuple[float, float]]
+    worker_ids: list[str] | None = None
+
+
 # ── Domain dataclasses (internal state) ──────────────────────────────────
 @dataclass
 class AccountRecord:

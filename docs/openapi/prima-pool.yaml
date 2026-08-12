@@ -564,6 +564,130 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /accounts/{account_id}/worker-logs:
+    get:
+      tags: [accounts]
+      operationId: accountWorkerLogs
+      summary: Return the account's worker-attributed inference logs in [begin, end), newest first.
+      description: >
+        Auth: user-scoped API key OR the account session token. Each request
+        served by a cluster appears once per worker the account owns in that
+        cluster, with that worker's layer share and effective (share-scaled)
+        token counts. `share`/`effective_*` are null when the cluster's layer
+        distribution is unknown.
+      security:
+        - apiKeyAuth: []
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: begin
+          in: query
+          required: true
+          schema: { type: number }
+          description: Start of the window (Unix seconds, inclusive).
+        - name: end
+          in: query
+          required: true
+          schema: { type: number }
+          description: End of the window (Unix seconds, exclusive).
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 1000, minimum: 1 }
+          description: Maximum number of entries to return.
+      responses:
+        "200":
+          description: The account's worker-attributed logs in the window.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkerLogEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /accounts/{account_id}/worker-logs/latest:
+    get:
+      tags: [accounts]
+      operationId: accountWorkerLogsLatest
+      summary: Return the account's most recent worker-attributed logs, newest first.
+      description: >
+        Auth: user-scoped API key OR the account session token. Returns up to
+        `limit` of the account's most recent worker-attributed log entries,
+        ordered by timestamp descending (newest first).
+      security:
+        - apiKeyAuth: []
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1 }
+          description: Maximum number of entries to return.
+      responses:
+        "200":
+          description: The account's most recent worker-attributed logs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkerLogEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /accounts/{account_id}/worker-stats:
+    post:
+      tags: [accounts]
+      operationId: accountWorkerStats
+      summary: Aggregate the account's worker-attributed usage over a list of (begin, end) windows.
+      description: >
+        Auth: user-scoped API key OR the account session token. Takes a list of
+        (begin, end) windows and returns one per-window object mapping each model
+        to its {total_tokens: [prompt, completion], effective_tokens: [prompt,
+        completion]}. `total_tokens` sums the request token counts over the
+        account's worker rows; `effective_tokens` sums the share-scaled counts.
+        If `worker_ids` is given, only rows for (worker_ids ∩ owned workers) are
+        included.
+      security:
+        - apiKeyAuth: []
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkerStatsRequest"
+      responses:
+        "200":
+          description: Per-window per-model worker-attributed aggregates.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties:
+                    $ref: "#/components/schemas/WorkerModelUsage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
 components:
   securitySchemes:
     apiKeyAuth:
@@ -1003,3 +1127,66 @@ components:
         requests: { type: integer }
         prompt_tokens: { type: integer }
         completion_tokens: { type: integer }
+
+    WorkerLogEntry:
+      type: object
+      required: [request_id, worker_id, model, prompt_tokens, completion_tokens, created_at]
+      properties:
+        request_id: { type: string }
+        worker_id: { type: string }
+        model: { type: string }
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        share:
+          type: number
+          nullable: true
+          description: >
+            The worker's layer share (layer_window / total layers across the
+            whole cluster). Null when the distribution is unknown. 0 for a
+            forwarder.
+        effective_prompt:
+          type: number
+          nullable: true
+          description: prompt_tokens * share (null when share is null).
+        effective_completion:
+          type: number
+          nullable: true
+          description: completion_tokens * share (null when share is null).
+        created_at: { type: number, description: Unix timestamp (seconds) }
+
+    WorkerStatsRequest:
+      type: object
+      required: [windows]
+      properties:
+        windows:
+          type: array
+          description: List of (begin, end) Unix-second windows.
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+        worker_ids:
+          type: array
+          nullable: true
+          description: >
+            Optional worker filter, intersected with the account's owned
+            workers. Empty/omitted = all owned workers.
+          items: { type: string }
+
+    WorkerModelUsage:
+      type: object
+      required: [total_tokens, effective_tokens]
+      properties:
+        total_tokens:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number }
+          description: [prompt, completion] summed over the account's worker rows.
+        effective_tokens:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number }
+          description: [prompt, completion] share-scaled, summed over the account's worker rows.
