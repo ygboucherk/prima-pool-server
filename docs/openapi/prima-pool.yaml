@@ -847,8 +847,23 @@ components:
     ReportReadyRequest:
       type: object
       description: >
-        Empty body. The caller is identified by the worker-scoped API key; no worker_id is needed.
-      properties: {}
+        Readiness report. The caller is identified by the worker-scoped API key.
+        `layer_windows` is OPTIONAL and only meaningful from the head (rank 0):
+        it carries the per-rank layer distribution computed by prima.cpp
+        (Halda/HiGHS) so the server can record it even if the WS distribution
+        frame was lost. An empty object `{}` means "distribution unknown"
+        (parse failure) and still satisfies the liveness gate. Workers leave it
+        unset.
+      properties:
+        layer_windows:
+          type: object
+          description: >
+            Rank -> layer count, keyed by ring position (Device Index). Only
+            the head reports it. The server maps rank -> worker_id via the
+            cluster's member order.
+          additionalProperties:
+            type: integer
+            minimum: 0
 
     ClusterStatus:
       type: object

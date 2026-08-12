@@ -286,14 +286,15 @@ The agent will:
 3. When enough matching workers are online, the server forms a cluster and
    pushes `cluster_assigned`.
 4. The client brings up WireGuard, launches prima.cpp in-container, and reports
-   ready.
+   ready. The head additionally parses prima.cpp's layer distribution (Halda)
+   from its stdout and reports it over WS + in its ready body.
 
 ---
 
 ## Part 4 — Use the pool
 
-Once a cluster is **live** (all members reported ready), a user with a
-`sk-user-...` key can send requests:
+Once a cluster is **live** — all members reported ready AND the head reported
+the layer distribution — a user with a `sk-user-...` key can send requests:
 
 ```bash
 curl http://<server>:8000/v1/chat/completions \

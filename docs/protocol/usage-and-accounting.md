@@ -58,7 +58,8 @@ accounting will need:
 
 | Signal in v0                    | Why accounting needs it                              |
 | ------------------------------- | ---------------------------------------------------- |
-| `worker.memory_allocated_mb`    | Layer attribution: a worker hosts layers proportional to its allocated memory. |
+| `cluster.layer_windows`         | **Actual** per-worker layer counts (Halda/HiGHS), reported by the head at cluster formation. This is the authoritative `layers_hosted` source — better than the memory-proportional estimate. An empty dict `{}` means "unknown" (head's stdout parse failed) and the memory-based estimate is the fallback. |
+| `worker.memory_allocated_mb`    | Fallback layer attribution when `layer_windows` is unknown: a worker hosts layers proportional to its allocated memory. |
 | `cluster.members + IPs`         | Which workers actually participated in a request.    |
 | `heartbeat` / liveness          | Workers must be live to serve; dead workers can't accrue. |
 | `relay.enabled` (per member)    | Relayed hops cost the operator bandwidth; payment may differ. |
@@ -71,9 +72,10 @@ accounting will need:
   summaries (aggregate signature), or the server samples/inspects a fraction of traffic.
 - **Sybil resistance.** Fake workers that claim work without doing it. Mitigations (reputation,
   staking, occasional verification jobs) are future work.
-- **Attribution.** Does `layers_hosted` track *hosted layers* (static: proportional to memory) or
-  *actively computed layers* (dynamic: depends on routing)? The README says the latter; the
-  protocol currently only carries the former.
+- **Attribution.** Does `layers_hosted` track *hosted layers* (static: the window Halda assigned) or
+  *actively computed layers* (dynamic: depends on routing)? v0 now captures the former precisely via
+  `cluster.layer_windows` (the head reports Halda's assignment at formation). Actively computed
+  layers per request remain unresolved — that would require per-request telemetry from the ring.
 
 ## 4. Compatibility constraints for v0
 
@@ -86,9 +88,12 @@ accounting will need:
 
 ## 5. Trust: self-declared memory
 
-`memory_allocated_mb` is **self-declared** in v0, and the entire token·layer attribution model
-rests on it. This is trivially gameable: a worker can declare a huge allocation, get assigned, and
-produce nothing. The docs treat this as an open problem; concrete mitigations for v1+:
+`memory_allocated_mb` is **self-declared** in v0. The good news: with `cluster.layer_windows` now
+captured, attribution no longer *rests solely* on the declared allocation — Halda's assignment is
+computed from actual profiled device capabilities (GFLOPS, memory bandwidth, disk speed), which is
+much harder to game than a self-declared number. `memory_allocated_mb` remains the fallback only
+when the distribution is unknown (`{}`). Still, nothing stops a worker from declaring a large
+allocation to *enter* a cluster while contributing little. Mitigations for v1+:
 
 - **Scheduling sanity**: the server can cross-check the declared allocation against the hardware
   reported at registration (e.g. a worker declaring 256 GB on a machine with 64 GB RAM is

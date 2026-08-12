@@ -27,6 +27,7 @@ On connect, the server sends a `hello` frame carrying the negotiated cadence and
 | `cluster_assigned`   | server → client | `cluster_id`, `worker_id`, `model`, `assigned_ip`, `subnet`, `ring_position`, `config_url` |
 | `cluster_dissolved`  | server → client | `cluster_id`, `reason` (member offline / member left)    |
 | `cluster_evicted`    | server → client | `reason` (v1; worker-initiated leave uses REST instead)  |
+| `layer_distribution` | client → server | `cluster_id`, `layer_windows` (rank → layer count). Sent by the HEAD (rank 0) once its prima.cpp is ready; the server records it on the cluster (rank mapped to worker_id via member order) and it is REQUIRED (along with all members' readiness) for the cluster to go live. An empty `layer_windows` (`{}`) means "unknown" (parse failure) and still satisfies the gate. |
 | `ping` / `pong`      | both            | keepalive                                                |
 
 ### Recovery rule
@@ -178,10 +179,13 @@ After bringing up WireGuard and joining the prima.cpp cluster, each member calls
 
 ### `POST /v1/clusters/{id}/ready`
 
-The request body is empty; the caller is identified by the worker-scoped API key (there is no
-`worker_id` in the body to avoid a mismatch surface between the key and the payload).
+The caller is identified by the worker-scoped API key (there is no `worker_id` in the body to avoid
+a mismatch surface between the key and the payload). The body may carry an optional
+`layer_windows` (rank → layer count) — the HEAD includes it as a fallback/duplicate of the WS
+`layer_distribution` frame; workers leave it unset. An empty `{}` means "distribution unknown".
 
-**Success — `202 Accepted`** (cluster is not live until all members are ready)
+**Success — `202 Accepted`** (cluster is not live until all members are ready AND the head has
+reported the layer distribution)
 
 ```json
 { "cluster_id": "clu_01HZ4...", "status": "assembling", "members_ready": 2, "members_total": 3 }
@@ -189,9 +193,14 @@ The request body is empty; the caller is identified by the worker-scoped API key
 
 **Errors** — `403 not_a_member` if the worker is not in the cluster.
 
-The cluster becomes **live** (routable) when the server has received `ready` from every member, or
-after a readiness timeout (default 60 s — members that miss it are marked failed and the cluster
-formation may be retried).
+The cluster becomes **live** (routable) only when BOTH conditions hold:
+1. the server received `ready` from every member, AND
+2. the head reported the layer distribution (over WS `layer_distribution` or in its `ready` body).
+
+The distribution is "reported" even when it is unknown (`{}`, e.g. the head's stdout parse failed)
+— liveness must never be blocked by a log parse. Live clusters always carry a distribution field
+(possibly `{}` = unknown) for accounting/worker-crediting. If the member set still contains a
+failed member after the readiness timeout (default 60 s), the cluster formation may be retried.
 
 ## 6. State recovery
 
