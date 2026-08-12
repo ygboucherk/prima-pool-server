@@ -541,8 +541,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         worker = _bound_worker(authorization, cluster_id)
         # If the head carries its rank-keyed layer distribution in the body
         # (WS fallback / primary), record it BEFORE marking readiness so the
-        # liveness gate can be satisfied atomically.
-        if body.layer_windows and worker.ring_position == 0:
+        # liveness gate can be satisfied atomically. Note: an EMPTY dict is a
+        # valid "unknown" report (parse failure) and must still be recorded —
+        # so we check `is not None`, not truthiness.
+        if body.layer_windows is not None and worker.ring_position == 0:
             lw = {k: v for k, v in body.layer_windows.items() if isinstance(v, int) and v >= 0}
             try:
                 # Map rank -> worker_id (members are in ring order).
@@ -554,7 +556,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                         continue
                     if 0 <= idx < len(cluster.members):
                         by_worker[cluster.members[idx]] = count
-                scheduler.on_layer_distribution(cluster_id, by_worker or None)
+                # NOTE: pass by_worker through even when empty — an empty dict
+                # is the 'reported unknown' marker ({}), distinct from None
+                # ('not reported'). Collapsing {} to None would block liveness
+                # on a parse failure, which the design forbids.
+                scheduler.on_layer_distribution(cluster_id, by_worker)
             except KeyError:
                 pass
         status = scheduler.on_ready(cluster_id, worker.worker_id)
@@ -852,10 +858,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                     continue
                 if 0 <= idx < len(cluster.members):
                     by_worker[cluster.members[idx]] = count
-            status = scheduler.on_layer_distribution(cluster_id, by_worker or None)
+            # Pass by_worker through even when empty — {} is the 'reported
+            # unknown' marker, distinct from None ('not reported').
+            status = scheduler.on_layer_distribution(cluster_id, by_worker)
             logger.info(
                 "recorded layer distribution for cluster %s from head %s (%s)",
-                cluster_id, worker_id, by_worker or None,
+                cluster_id, worker_id, by_worker,
             )
             if status == ClusterStatus.live:
                 logger.info("cluster %s is now live", cluster_id)

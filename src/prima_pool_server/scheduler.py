@@ -294,8 +294,9 @@ class Scheduler:
         """Record the head's layer-distribution report.
 
         Only the head (rank 0 / ring_position 0) is expected to send this.
-        `layer_windows=None` records an explicit 'unknown' so liveness is not
-        blocked by a failed stdout parse. Returns the cluster status.
+        An EMPTY dict ({}) is the 'reported unknown' marker (parse failure) and
+        must still satisfy the liveness gate — only None ('not reported')
+        blocks it. Returns the cluster status.
         """
         cluster = self.store.get_cluster(cluster_id)
         if cluster is None:

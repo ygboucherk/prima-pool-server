@@ -387,6 +387,29 @@ def test_cluster_ready_and_live(client: TestClient):
     assert r2.json()["status"] == "live"
 
 
+def test_cluster_ready_live_with_unknown_distribution(client: TestClient, store: Store):
+    """An EMPTY layer_windows ({} = "unknown", parse failure) must still let
+    the cluster go live — liveness must never be blocked by a log parse."""
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+    for key, w in ((key1, w1), (key2, w2)):
+        client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    cluster_id = st1["cluster"]["cluster_id"]
+
+    # Head reports "unknown" distribution (empty dict) via REST.
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {}})
+    assert r1.status_code == 202
+    assert r1.json()["status"] == "assembling"
+    r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
+    assert r2.json()["status"] == "live", r2.text
+
+    # The distribution field is recorded as unknown (empty dict).
+    cluster = store.get_cluster(cluster_id)
+    assert cluster is not None
+    assert cluster.layer_windows == {}
+
+
 def test_worker_leave_dissolves_cluster(client: TestClient, store: Store):
     key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
     key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
