@@ -22,6 +22,11 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
   clusters only ever group workers with identical hashes
 - **Model discovery** — `GET /v1/models` (unauthenticated) lists the pool's models,
   their GGUF hashes, required memory, and current liveness
+- **Public info** — `GET /v1/workers/{id}/info` and `GET /v1/clusters/{id}/info`
+  (both unauthenticated) expose minimal, anonymized device/cluster data: the
+  advertised RAM pool share of a worker, and a cluster's member list (ring order)
+  with each member's layer window — the "what kind of machines ran my prompt"
+  view. Deliberately no account ids, endpoints, or availability history.
 - **WebSocket push** — `cluster_assigned` / `cluster_dissolved` frames (REST is the
   source of truth; WS is an accelerator)
 - **Inference proxy** — `POST /v1/chat/completions` (auth: user key) routes a request

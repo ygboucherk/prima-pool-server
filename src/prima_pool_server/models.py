@@ -191,6 +191,55 @@ class ClusterStatusResponse(BaseModel):
     members_total: int
 
 
+class WorkerInfo(BaseModel):
+    """Public worker info (unauthenticated, deliberately minimal).
+
+    Exposes only class-level, anonymized data: the worker id (already known
+    to the caller), the advertised RAM pool share, and the model the worker
+    serves. NO account id, NO endpoint/WG/IP data, NO availability history —
+    those stay behind auth.
+
+    memory_allocated_mb is the share the worker ADVERTISED at registration
+    (updated on re-registration of the same device) — it is a stable capacity
+    signal, NOT live free RAM (which would leak availability patterns).
+
+    Future hardware stats must stay class-level (e.g. device class, CPU
+    family) and must NOT become instance fingerprints (exact CPU model
+    strings, OS versions) — this endpoint is public.
+    """
+
+    worker_id: str
+    model: str
+    memory_allocated_mb: int
+
+
+class ClusterMemberInfo(BaseModel):
+    """One member of a cluster, as shown in the public cluster info.
+
+    Anonymized: worker_id is an opaque random id (no owner, no endpoint).
+    """
+
+    worker_id: str
+    layer_window: int | None = None
+
+
+class ClusterInfo(BaseModel):
+    """Public cluster info (unauthenticated, deliberately minimal).
+
+    Exposes the member list (in ring order, index 0 = head) and the layer
+    distribution per worker — the "what kind of machines ran my prompt"
+    amazement. NO account ids, NO WG IPs, NO endpoint data.
+
+    layer_window may be None (head has not reported a distribution yet) or 0
+    (a pure forwarder — a valid value, not "no data").
+    """
+
+    cluster_id: str
+    model: str
+    status: ClusterStatus
+    members: list[ClusterMemberInfo]
+
+
 class RequestLogEntry(BaseModel):
     """A single logged inference request (user-facing view)."""
 

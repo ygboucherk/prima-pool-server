@@ -208,6 +208,52 @@ paths:
                 items:
                   $ref: "#/components/schemas/ModelInfo"
 
+  /workers/{worker_id}/info:
+    get:
+      tags: [workers]
+      operationId: getWorkerInfo
+      summary: Public worker info (unauthenticated).
+      description: >
+        Deliberately minimal and anonymized: the worker id (already known to the
+        caller), the model it serves, and its advertised RAM pool share. No
+        account id, no endpoint/WG/IP data, no availability history — those stay
+        behind auth. Future hardware stats must remain class-level (device
+        class, CPU family), never instance fingerprints.
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "200":
+          description: Public worker info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /clusters/{cluster_id}/info:
+    get:
+      tags: [clusters]
+      operationId: getClusterInfo
+      summary: Public cluster info (unauthenticated).
+      description: >
+        Deliberately minimal and anonymized: the cluster id, model, status, and
+        the member list in ring order (index 0 = head) with each member's layer
+        window — the "what kind of machines ran my prompt" view. No account ids,
+        no WG/IP data. layer_window may be null (head has not reported a
+        distribution yet) or 0 (a pure forwarder — a valid value, not "no data").
+      parameters:
+        - $ref: "#/components/parameters/ClusterId"
+      responses:
+        "200":
+          description: Public cluster info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /workers/register:
     post:
       tags: [workers]
@@ -783,6 +829,56 @@ components:
         model: { type: string }
         cluster:
           $ref: "#/components/schemas/ClusterAssignment"
+
+    WorkerInfo:
+      type: object
+      required: [worker_id, model, memory_allocated_mb]
+      description: >
+        Public worker info (unauthenticated). Deliberately minimal and anonymized:
+        worker id, model, and advertised RAM pool share only. No account id, no
+        endpoint/WG/IP data, no availability history. Future hardware stats must
+        remain class-level (device class, CPU family) — never instance
+        fingerprints (exact CPU model strings, OS versions).
+      properties:
+        worker_id: { type: string }
+        model: { type: string }
+        memory_allocated_mb:
+          type: integer
+          description: >
+            Advertised RAM pool share, set at registration and updated on
+            re-registration of the same device. A stable capacity signal, NOT
+            live free RAM (which would leak availability patterns).
+
+    ClusterMemberInfo:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id: { type: string, description: Opaque random id; no owner, no endpoint. }
+        layer_window:
+          type: integer
+          nullable: true
+          description: >
+            Number of model layers this worker runs. null = head has not reported a
+            distribution yet; 0 = pure forwarder (a valid value, not "no data").
+
+    ClusterInfo:
+      type: object
+      required: [cluster_id, model, status, members]
+      description: >
+        Public cluster info (unauthenticated). Deliberately minimal and anonymized:
+        cluster id, model, status, and the member list in ring order (index 0 =
+        head) with each member's layer window. No account ids, no WG/IP data.
+      properties:
+        cluster_id: { type: string }
+        model: { type: string }
+        status:
+          type: string
+          enum: [assembling, live, terminated]
+        members:
+          type: array
+          description: Members in ring order (index 0 = head).
+          items:
+            $ref: "#/components/schemas/ClusterMemberInfo"
 
     ClusterAssignment:
       type: object

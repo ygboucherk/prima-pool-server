@@ -29,6 +29,8 @@ from .models import (
     ApiKey,
     ApiKeySummary,
     ClusterConfig,
+    ClusterInfo,
+    ClusterMemberInfo,
     ClusterStatus,
     ClusterStatusResponse,
     CreateKeyRequest,
@@ -42,6 +44,7 @@ from .models import (
     Session,
     UsageStatsRequest,
     Worker,
+    WorkerInfo,
     WorkerRecord,
     WorkerState,
     WorkerStatus,
@@ -593,6 +596,54 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             )
             for md in settings.models.values()
         ]
+
+    # ── public info (unauthenticated, deliberately minimal) ───────────────
+    # Both endpoints expose ONLY anonymized, class-level data (worker ids are
+    # opaque random ids; no account, endpoint, or availability info). This is
+    # the "what kind of machines ran my prompt" amazement feature. Anything
+    # instance-level (exact CPU model, OS version, live free RAM, WG IPs) must
+    # NOT be added here — see WorkerInfo / ClusterInfo docstrings.
+
+    @app.get("/v1/workers/{worker_id}/info", response_model=WorkerInfo)
+    async def worker_info(worker_id: str):
+        """Public worker info (unauthenticated).
+
+        Returns the worker's id, model, and advertised RAM pool share.
+        Deliberately minimal — see WorkerInfo.
+        """
+        w = store.get_worker(worker_id)
+        if w is None:
+            raise NotFoundError("Worker does not exist.")
+        return WorkerInfo(
+            worker_id=w.worker_id,
+            model=w.model,
+            memory_allocated_mb=w.memory_allocated_mb,
+        )
+
+    @app.get("/v1/clusters/{cluster_id}/info", response_model=ClusterInfo)
+    async def cluster_info(cluster_id: str):
+        """Public cluster info (unauthenticated).
+
+        Returns the member list (in ring order, index 0 = head) with each
+        worker's layer window — the "what kind of machines ran my prompt"
+        view. Deliberately minimal — see ClusterInfo.
+        """
+        cluster = store.get_cluster(cluster_id)
+        if cluster is None:
+            raise NotFoundError("Cluster does not exist.")
+        layer_windows = cluster.layer_windows or {}
+        return ClusterInfo(
+            cluster_id=cluster.cluster_id,
+            model=cluster.model,
+            status=cluster.status,
+            members=[
+                ClusterMemberInfo(
+                    worker_id=wid,
+                    layer_window=layer_windows.get(wid),
+                )
+                for wid in cluster.members
+            ],
+        )
 
     # ── inference proxy (option A: server joins WG, proxies to head) ─────
     @app.post("/v1/chat/completions")
