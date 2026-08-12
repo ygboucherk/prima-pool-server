@@ -792,7 +792,7 @@ class Store:
         given, only rows for (worker_ids ∩ owned workers) are returned.
         """
         sql = (
-            "SELECT r.request_id, r.model, r.prompt_tokens, r.completion_tokens, "
+            "SELECT r.request_id, r.model, r.cluster_id, r.prompt_tokens, r.completion_tokens, "
             "       r.created_at, cm.worker_id, cm.layer_window, "
             "       (SELECT SUM(cm2.layer_window) FROM cluster_members cm2 "
             "         WHERE cm2.cluster_id = r.cluster_id) AS cluster_total "
@@ -817,7 +817,7 @@ class Store:
         """Return the most recent per-request-per-worker attribution rows for
         an account's workers, newest first (no time filter)."""
         rows = self._fetch_all(
-            "SELECT r.request_id, r.model, r.prompt_tokens, r.completion_tokens, "
+            "SELECT r.request_id, r.model, r.cluster_id, r.prompt_tokens, r.completion_tokens, "
             "       r.created_at, cm.worker_id, cm.layer_window, "
             "       (SELECT SUM(cm2.layer_window) FROM cluster_members cm2 "
             "         WHERE cm2.cluster_id = r.cluster_id) AS cluster_total "

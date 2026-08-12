@@ -86,6 +86,7 @@ def _attribution_entry(row: dict) -> WorkerLogEntry:
         request_id=row["request_id"],
         worker_id=row["worker_id"],
         model=row["model"],
+        cluster_id=row["cluster_id"],
         prompt_tokens=row["prompt_tokens"],
         completion_tokens=row["completion_tokens"],
         share=share,

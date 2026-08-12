@@ -277,6 +277,7 @@ class WorkerLogEntry(BaseModel):
     request_id: str
     worker_id: str
     model: str
+    cluster_id: str
     prompt_tokens: int
     completion_tokens: int
     share: float | None
