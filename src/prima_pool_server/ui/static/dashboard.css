@@ -125,6 +125,30 @@ td { color: #d6dbe6; }
 .badge.registered { background: #2a3245; color: #8b93a7; }
 .badge.online { background: #1c3a2a; color: #5fd489; }
 .badge.offline { background: #3a1c1c; color: #ff8585; }
+.badge.head { background: #23305a; color: #7fa0ff; }
+.badge.unknown { background: #2a3245; color: #8b93a7; }
+
+/* Clickable cluster ids (usage logs + workers tables). */
+.cluster-link {
+  color: #7fa0ff;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+.cluster-link:hover { color: #a9c0ff; }
+
+/* Cluster drill-down view. */
+.back-link { margin-bottom: 8px; }
+.back-link button {
+  background: none;
+  border: 1px solid #273049;
+  color: #8b93a7;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.back-link button:hover { color: #e6e9f0; border-color: #3a4459; }
 
 .empty { color: #667088; font-style: italic; padding: 12px 0; }
 

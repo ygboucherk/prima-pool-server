@@ -102,6 +102,16 @@
             <tbody id="keys-body"></tbody>
           </table>
         </section>
+
+        <section id="tab-cluster" hidden>
+          <p class="back-link"><button type="button" id="cluster-back-btn">← Back</button></p>
+          <h2>Cluster <code id="cluster-id"></code></h2>
+          <p class="hint">Machines in this cluster (ring order — index 0 is the head).</p>
+          <table>
+            <thead><tr><th>Position</th><th>Worker</th><th>Model</th><th>Memory</th><th>Layers</th></tr></thead>
+            <tbody id="cluster-body"></tbody>
+          </table>
+        </section>
       </div>
     </section>
   </main>

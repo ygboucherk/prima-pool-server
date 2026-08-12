@@ -105,6 +105,7 @@
       $('stat-workers').textContent = data.workers.length;
       $('stat-online').textContent = data.workers.filter((w) => w.online).length;
       $('stat-keys').textContent = data.keys.length;
+      buildWorkerMemoryMap();
       renderWorkers(data.workers);
       renderKeys(data.keys);
       refreshUsageTab();
@@ -231,9 +232,10 @@
       tr.innerHTML = `
         <td>${when}</td>
         <td>${log.model}</td>
-        <td><code>${log.cluster_id}</code></td>
+        <td><code class="cluster-link" data-cluster="${log.cluster_id}">${log.cluster_id}</code></td>
         <td>${log.prompt_tokens}</td>
         <td>${log.completion_tokens}</td>`;
+      tr.querySelector('.cluster-link').addEventListener('click', () => openCluster(log.cluster_id));
       tbody.appendChild(tr);
     }
   }
@@ -271,8 +273,84 @@
         <td><span class="badge ${w.status}">${w.status}</span></td>
         <td>${online}</td>
         <td>${(w.memory_mb / 1024).toFixed(1)} GB</td>
-        <td>${w.cluster_id ? `<code>${w.cluster_id}</code>` : '—'}</td>`;
+        <td>${w.cluster_id ? `<code class="cluster-link" data-cluster="${w.cluster_id}">${w.cluster_id}</code>` : '—'}</td>`;
+      const link = tr.querySelector('.cluster-link');
+      if (link) link.addEventListener('click', () => openCluster(w.cluster_id));
       tbody.appendChild(tr);
+    }
+  }
+
+  // ── cluster view ─────────────────────────────────────────────────────
+  // A single-cluster "drill-down" view. It reuses the public
+  // /v1/clusters/{id}/info endpoint (unauthenticated) plus the account's own
+  // worker list for RAM — so no cluster-scoped auth is needed, and the page
+  // degrades gracefully if the cluster is gone (404 → friendly message).
+
+  let currentClusterId = null;
+
+  // Fetch the worker id -> memory map once per page load (from the account
+  // overview). Workers the account does not own show "—".
+  let workerMemoryById = null;
+  function buildWorkerMemoryMap() {
+    if (overview && overview.workers) {
+      workerMemoryById = {};
+      for (const w of overview.workers) workerMemoryById[w.worker_id] = w.memory_mb;
+    }
+  }
+
+  // Enrich the public cluster info (worker ids + layer windows) with the
+  // memory each member advertises, when the account owns it.
+  async function fetchClusterInfo(clusterId) {
+    const info = await api('/v1/clusters/' + encodeURIComponent(clusterId) + '/info');
+    if (!workerMemoryById) buildWorkerMemoryMap();
+    for (const m of info.members) {
+      m.memory_mb = workerMemoryById ? (workerMemoryById[m.worker_id] || null) : null;
+    }
+    return info;
+  }
+
+  function renderClusterInfo(info) {
+    const tbody = $('cluster-body');
+    tbody.innerHTML = '';
+    $('cluster-id').textContent = info.cluster_id;
+    if (!info.members.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">This cluster has no members.</td></tr>';
+      return;
+    }
+    for (let i = 0; i < info.members.length; i++) {
+      const m = info.members[i];
+      const tr = document.createElement('tr');
+      const layers = m.layer_window === null || m.layer_window === undefined
+        ? '<span class="badge unknown">unknown</span>'
+        : m.layer_window;
+      const mem = m.memory_mb ? (m.memory_mb / 1024).toFixed(1) + ' GB' : '—';
+      const head = i === 0 ? ' <span class="badge head">head</span>' : '';
+      tr.innerHTML = `
+        <td>${i}${head}</td>
+        <td><code>${m.worker_id}</code></td>
+        <td>${info.model}</td>
+        <td>${mem}</td>
+        <td>${layers}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function openCluster(clusterId) {
+    currentClusterId = clusterId;
+    activateTab('cluster');
+    const tbody = $('cluster-body');
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">Loading…</td></tr>';
+    $('cluster-id').textContent = clusterId;
+    try {
+      const info = await fetchClusterInfo(clusterId);
+      renderClusterInfo(info);
+    } catch (e) {
+      // 404: the cluster is gone (dissolved) — that's a normal, non-error state.
+      if (e.status === 404) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">This cluster no longer exists (it was dissolved).</td></tr>';
+        return;
+      }
+      handleApiError(e);
     }
   }
 
@@ -340,7 +418,7 @@
     document.querySelectorAll('.tab-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    for (const id of ['overview', 'usage', 'workers', 'keys']) {
+    for (const id of ['overview', 'usage', 'workers', 'keys', 'cluster']) {
       $('tab-' + id).hidden = id !== name;
     }
     if (name === 'keys') renderKeys(overview ? overview.keys : []);
@@ -350,6 +428,8 @@
   document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.addEventListener('click', () => activateTab(btn.dataset.tab));
   });
+
+  $('cluster-back-btn').addEventListener('click', () => activateTab('workers'));
 
   function show(view) { showAuth(view); }
 
