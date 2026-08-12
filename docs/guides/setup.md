@@ -185,6 +185,13 @@ database** — a single file that survives restarts:
 - **Legacy migration**: if you previously ran the old JSON-snapshot store
   (`store.json`), it is **auto-migrated** into SQLite on first start. The JSON
   file is kept (not deleted).
+- **Schema upgrades**: when the server starts against a DB created by an older
+  version, it **auto-upgrades the schema in place** (adds new columns). In
+  particular, upgrading to the layer-distribution version backfills an explicit
+  "unknown" distribution (`{}`) onto any **live** cluster that predates layer
+  accounting — so the invariant "a live cluster always carries a distribution
+  field" holds even across upgrades. (`assembling`/`terminated` clusters are
+  untouched.) No manual step needed; existing data is preserved.
 - **Backup**: the DB is a single file — back it up by copying it, e.g.
   `docker compose exec server cp /data/store.db /data/store.db.bak` (or back up
   the Docker volume).
@@ -315,6 +322,7 @@ Streaming is supported (`"stream": true` → SSE).
 | Worker never assigned | Not enough matching memory, or hash mismatch | Check `GET /v1/models`; ensure `PRIMA_POOL_MODEL` + hash match; add more workers |
 | `400 ... does not match` at registration | Wrong GGUF hash | Use the exact model file the registry pins |
 | WG interface won't come up | No `/dev/net/tun` or kernel module | See Part 1 |
+| Cluster stays `assembling`, never `live` | Head hasn't reported the layer distribution (WS dropped AND REST body lost, or `PRIMA_POOL_PRIMA_READY_TIMEOUT_S` exceeded) | Check head logs for "sent layer distribution" / "readiness reported". The cluster goes live only when ALL members report ready AND the head reports a distribution — an empty one (`{}`, unknown) still counts. Ensure the head's WS is up; the REST `ready` body carries the same distribution as a fallback |
 | Peers can't reach each other | Endpoint is a container IP / NAT | Set `PRIMA_POOL_WG_ENDPOINT_HOST` to a reachable IP (or rely on the server's observed source IP). For hard NAT, deploy a relay (Part 6) |
 | `502 Upstream Error` on `/v1/chat/completions` | Server can't reach the head over WG | Ensure `PRIMA_POOL_SERVER_JOIN_WG=true` + `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST` set, the server image has `wireguard-tools`, and the server joined the cluster (check server logs for `server joined cluster`) |
 | `no service selected` (client) | `COMPOSE_PROFILES` missing | Not applicable — client uses `same-container` mode |
