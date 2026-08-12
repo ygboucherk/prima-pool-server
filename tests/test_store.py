@@ -227,6 +227,44 @@ def test_migrate_existing_db_adds_cluster_layer_windows(tmp_path):
     s.close()
 
 
+def test_migrate_backfills_unknown_distribution_for_live_clusters(tmp_path):
+    """A LIVE cluster created before layer accounting must be backfilled with
+    an explicit 'unknown' distribution ({}) on upgrade — the invariant is that
+    a live cluster always carries a distribution field. This matters because a
+    server upgrade does NOT dissolve live clusters (workers re-heartbeat), so a
+    NULL would persist indefinitely. Non-live clusters stay untouched."""
+    import sqlite3
+
+    db = str(tmp_path / "store.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE clusters (cluster_id TEXT PRIMARY KEY, model TEXT NOT NULL,
+            subnet TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
+            members_json TEXT NOT NULL, ready_json TEXT NOT NULL, ips_json TEXT NOT NULL);
+        """
+    )
+    conn.execute(
+        "INSERT INTO clusters VALUES ('clu_live','m','10.0.0.0/24','live',1.0,'[]','[]','{}')"
+    )
+    conn.execute(
+        "INSERT INTO clusters VALUES ('clu_assem','m','10.0.1.0/24','assembling',1.0,'[]','[]','{}')"
+    )
+    conn.execute(
+        "INSERT INTO clusters VALUES ('clu_term','m','10.0.2.0/24','terminated',1.0,'[]','[]','{}')"
+    )
+    conn.commit()
+    conn.close()
+
+    s = Store(path=db)
+    # Live cluster: backfilled to {} (reported-unknown), not None.
+    assert s.get_cluster("clu_live").layer_windows == {}
+    # Non-live clusters: untouched (None = not reported).
+    assert s.get_cluster("clu_assem").layer_windows is None
+    assert s.get_cluster("clu_term").layer_windows is None
+    s.close()
+
+
 def test_request_recording_roundtrip(tmp_path):
     path = str(tmp_path / "store.db")
     s = Store(path=path)

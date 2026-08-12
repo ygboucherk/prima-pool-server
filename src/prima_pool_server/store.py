@@ -308,6 +308,23 @@ class Store:
                 "ALTER TABLE clusters ADD COLUMN layer_windows_json TEXT"
             )
             logger.info("migrated clusters: added column layer_windows_json")
+        # Backfill the invariant: a LIVE cluster that predates layer accounting
+        # must carry an explicit "unknown" distribution ({}) rather than NULL —
+        # the new liveness rule says a live cluster always has a distribution
+        # field. This matters because a server upgrade does NOT dissolve live
+        # clusters (liveness is worker-driven; workers re-heartbeat on
+        # reconnect and the head never re-reports), so a NULL here would
+        # persist indefinitely otherwise. Idempotent safety net: only touches
+        # rows that are live AND NULL.
+        cur = self._conn.execute(
+            "UPDATE clusters SET layer_windows_json = '{}' "
+            "WHERE status = 'live' AND layer_windows_json IS NULL"
+        )
+        if cur.rowcount:
+            logger.info(
+                "backfilled unknown layer distribution for %d live cluster(s)",
+                cur.rowcount,
+            )
 
     # ── legacy migration ─────────────────────────────────────────────────
     def _find_legacy_json(self, db_path: str) -> str | None:
