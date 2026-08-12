@@ -272,7 +272,12 @@ class Scheduler:
         The distribution is 'reported' even when the head's parse failed
         (layer_windows={} records 'unknown'), so a parse failure can never
         block availability — it only marks the accounting data as unknown.
+
+        Never resurrects a TERMINATED cluster: a late ready/distribution frame
+        racing a dissolve must not flip a dissolved cluster back to live.
         """
+        if cluster.status == ClusterStatus.terminated:
+            return False
         all_members_ready = len(cluster.ready) >= len(cluster.members)
         distribution_reported = cluster.layer_windows is not None
         if all_members_ready and distribution_reported:

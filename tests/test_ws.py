@@ -176,3 +176,37 @@ def test_layer_distribution_rejected_from_worker(client: TestClient, store: Stor
         cluster = store.get_cluster(cluster_id)
         assert cluster is not None
         assert cluster.layer_windows is None
+
+
+def test_layer_distribution_does_not_resurrect_terminated_cluster(client: TestClient, store: Store):
+    """A late distribution frame racing a dissolve must NOT flip a terminated
+    cluster back to live — the proxy would otherwise target a dead cluster."""
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+
+    with client.websocket_connect(f"/v1/workers/{w1['worker_id']}/events?api_key={key1}") as ws:
+        ws.receive_json()  # hello
+        client.post(f"/v1/workers/{w1['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key1}"})
+        client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key2}"})
+        assigned = ws.receive_json()
+        assert assigned["type"] == "cluster_assigned"
+        cluster_id = assigned["cluster_id"]
+
+        # Dissolve: w2 leaves → cluster terminated.
+        client.delete(f"/v1/workers/{w2['worker_id']}", headers={"Authorization": f"Bearer {key2}"})
+        ws.receive_json()  # cluster_dissolved for w1
+
+        # A late distribution frame from the head must NOT resurrect it.
+        ws.send_json(
+            {
+                "type": "layer_distribution",
+                "cluster_id": cluster_id,
+                "layer_windows": {"0": 24, "1": 24},
+            }
+        )
+        import time as _time
+
+        _time.sleep(0.2)
+        cluster = store.get_cluster(cluster_id)
+        assert cluster is not None
+        assert cluster.status.value == "terminated"
