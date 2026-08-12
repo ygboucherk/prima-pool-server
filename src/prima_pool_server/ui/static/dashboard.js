@@ -109,6 +109,7 @@
       renderWorkers(data.workers);
       renderKeys(data.keys);
       refreshUsageTab();
+      refreshWorkersTab();
       setStatus('connected', 'ok');
     } catch (e) {
       handleApiError(e);
@@ -162,19 +163,16 @@
     return step;
   }
 
-  function renderUsageChart(stats) {
-    const chart = $('usage-chart');
-    const empty = $('usage-chart-empty');
+  // Generic bar chart over the last 7 daily windows. `summarize(win)` maps a
+  // per-window stats object to {prompt, completion} token totals.
+  function renderBarChart(chartId, emptyId, stats, summarize) {
+    const chart = $(chartId);
+    const empty = $(emptyId);
     chart.innerHTML = '';
     const windows = last7DayWindows();
-    // stats is an array of per-window objects {model: {requests, prompt_tokens, completion_tokens}}.
     const totals = windows.map((w, i) => {
       const win = stats[i] || {};
-      let prompt = 0, completion = 0;
-      for (const m of Object.values(win)) {
-        prompt += m.prompt_tokens || 0;
-        completion += m.completion_tokens || 0;
-      }
+      const { prompt, completion } = summarize(win);
       return { begin: w[0], prompt, completion };
     });
     const max = Math.max(1, ...totals.map((t) => t.prompt + t.completion));
@@ -219,6 +217,31 @@
     chart.appendChild(bars);
   }
 
+  function renderUsageChart(stats) {
+    // stats is an array of per-window objects {model: {requests, prompt_tokens, completion_tokens}}.
+    renderBarChart('usage-chart', 'usage-chart-empty', stats, (win) => {
+      let prompt = 0, completion = 0;
+      for (const m of Object.values(win)) {
+        prompt += m.prompt_tokens || 0;
+        completion += m.completion_tokens || 0;
+      }
+      return { prompt, completion };
+    });
+  }
+
+  function renderWorkerChart(stats) {
+    // stats is an array of per-window objects {model: {total_tokens, effective_tokens}}.
+    renderBarChart('worker-chart', 'worker-chart-empty', stats, (win) => {
+      let prompt = 0, completion = 0;
+      for (const m of Object.values(win)) {
+        const eff = m.effective_tokens || [0, 0];
+        prompt += eff[0] || 0;
+        completion += eff[1] || 0;
+      }
+      return { prompt, completion };
+    });
+  }
+
   function renderUsageLogs(logs) {
     const tbody = $('usage-body');
     tbody.innerHTML = '';
@@ -252,6 +275,50 @@
       ]);
       renderUsageChart(stats);
       renderUsageLogs(logs);
+    } catch (e) {
+      handleApiError(e);
+    }
+  }
+
+  function renderWorkerLogs(logs) {
+    const tbody = $('worker-logs-body');
+    tbody.innerHTML = '';
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No inference yet</td></tr>';
+      return;
+    }
+    for (const log of logs) {
+      const tr = document.createElement('tr');
+      const when = new Date(log.created_at * 1000).toLocaleString();
+      const effP = (log.effective_prompt === null || log.effective_prompt === undefined)
+        ? '—' : log.effective_prompt.toFixed(1);
+      const effC = (log.effective_completion === null || log.effective_completion === undefined)
+        ? '—' : log.effective_completion.toFixed(1);
+      tr.innerHTML = `
+        <td>${when}</td>
+        <td>${log.model}</td>
+        <td><code>${log.worker_id}</code></td>
+        <td><code class="cluster-link" data-cluster="${log.cluster_id}">${log.cluster_id}</code></td>
+        <td>${effP}</td>
+        <td>${effC}</td>`;
+      const link = tr.querySelector('.cluster-link');
+      if (link) link.addEventListener('click', () => openCluster(log.cluster_id));
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function refreshWorkersTab() {
+    if (!sessionToken || !accountId) return;
+    try {
+      const [stats, logs] = await Promise.all([
+        api('/v1/accounts/' + accountId + '/worker-stats', {
+          method: 'POST',
+          body: JSON.stringify({ windows: last7DayWindows() }),
+        }),
+        api('/v1/accounts/' + accountId + '/worker-logs/latest?limit=15'),
+      ]);
+      renderWorkerChart(stats);
+      renderWorkerLogs(logs);
     } catch (e) {
       handleApiError(e);
     }
@@ -423,6 +490,7 @@
     }
     if (name === 'keys') renderKeys(overview ? overview.keys : []);
     if (name === 'usage') refreshUsageTab();
+    if (name === 'workers') refreshWorkersTab();
   }
 
   document.querySelectorAll('.tab-btn').forEach((btn) => {

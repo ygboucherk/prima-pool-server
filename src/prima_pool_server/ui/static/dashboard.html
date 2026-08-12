@@ -77,6 +77,19 @@
 
         <section id="tab-workers" hidden>
           <h2>Workers</h2>
+          <p class="hint">Your workers' effective token usage over the last 7 days, and their most recent attributed inferences.</p>
+
+          <h3>Effective usage (last 7 days)</h3>
+          <div id="worker-chart" class="usage-chart" aria-label="Daily effective token usage bar chart"></div>
+          <p id="worker-chart-empty" class="empty" hidden>No worker usage in the last 7 days.</p>
+
+          <h3>Latest inference</h3>
+          <table>
+            <thead><tr><th>When</th><th>Model</th><th>Worker</th><th>Cluster</th><th>Eff. prompt</th><th>Eff. completion</th></tr></thead>
+            <tbody id="worker-logs-body"><tr><td colspan="6" class="empty">No inference yet</td></tr></tbody>
+          </table>
+
+          <h3>Workers</h3>
           <table>
             <thead><tr><th>Worker</th><th>Model</th><th>Status</th><th>Online</th><th>Memory</th><th>Cluster</th></tr></thead>
             <tbody id="workers-body"></tbody>
