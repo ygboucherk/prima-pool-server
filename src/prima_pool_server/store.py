@@ -576,6 +576,18 @@ class Store:
             # so a worker referencing a cluster cannot be inserted first.
             for c in data.get("clusters", []):
                 clu = _cluster_from_legacy_dict(c)
+                # Backfill the live-cluster invariant BEFORE the row is
+                # written: a LIVE cluster in the snapshot predates layer
+                # accounting and carries no distribution — give it the
+                # explicit "unknown" ({}) marker. This matters because
+                # `_migrate_schema`'s backfill step is gated on `pre_v06`
+                # (members_json present), which is False on the freshly
+                # created DB here — so without this, a migrated live cluster
+                # would read back layer_windows=None and violate the
+                # "live ⇒ distribution reported" invariant indefinitely.
+                # Assembling/terminated clusters stay unreported (None).
+                if clu.layer_windows is None and clu.status == ClusterStatus.live:
+                    clu.layer_windows = {}
                 conn.execute(
                     "INSERT OR IGNORE INTO clusters (cluster_id, model, subnet, status, created_at, "
                     "distribution_reported) "

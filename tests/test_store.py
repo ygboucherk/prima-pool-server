@@ -515,6 +515,65 @@ def test_legacy_json_path_redirects_to_db(tmp_path):
     s.close()
 
 
+def test_legacy_json_migration_backfills_live_cluster_distribution(tmp_path):
+    """A LIVE cluster in a legacy JSON snapshot must migrate with an explicit
+    'unknown' distribution ({}), not None — the invariant is that a live
+    cluster always carries a distribution field.
+
+    Regression: the JSON→SQLite migration ran `_migrate_schema` on a freshly
+    created DB, where `pre_v06` (members_json present) is False — so the
+    v0.5 live-cluster backfill step never ran, and the migrated live cluster
+    read back layer_windows=None, violating the invariant indefinitely.
+    """
+    import json
+
+    legacy = tmp_path / "store.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {"account_id": "acc_1", "username": "alice", "password_hash": "h", "created_at": 1.0}
+                ],
+                "api_keys": [],
+                "clusters": [
+                    {
+                        "cluster_id": "clu_live",
+                        "model": "demo-model",
+                        "subnet": "10.23.1.0/24",
+                        "status": "live",
+                        "members": ["w1", "w2"],
+                        "ready": ["w1", "w2"],
+                        "ips": {"w1": "10.23.1.1", "w2": "10.23.1.2"},
+                        "created_at": 1.0,
+                    },
+                    {
+                        "cluster_id": "clu_assem",
+                        "model": "demo-model",
+                        "subnet": "10.23.2.0/24",
+                        "status": "assembling",
+                        "members": ["w1"],
+                        "ready": [],
+                        "ips": {"w1": "10.23.2.1"},
+                        "created_at": 1.0,
+                    },
+                ],
+                "workers": [],
+            }
+        )
+    )
+    s = Store(path=str(tmp_path / "store.db"))
+    live = s.get_cluster("clu_live")
+    assert live is not None
+    assert live.members == ["w1", "w2"]
+    assert live.ready == {"w1", "w2"}
+    assert live.layer_windows == {}, f"live cluster must be reported-unknown, got {live.layer_windows}"
+    # Non-live clusters stay untouched (None = not reported).
+    assem = s.get_cluster("clu_assem")
+    assert assem is not None
+    assert assem.layer_windows is None
+    s.close()
+
+
 def test_worker_can_be_member_of_multiple_clusters(tmp_path):
     """Membership is many-to-many over time: a worker belongs to its current
     cluster AND every terminated cluster it previously served in. The junction
