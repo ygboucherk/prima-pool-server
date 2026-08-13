@@ -33,6 +33,7 @@ from .models import (
     ClusterMemberInfo,
     ClusterStatus,
     ClusterStatusResponse,
+    ChangePasswordRequest,
     CreateKeyRequest,
     LoginRequest,
     ModelInfo,
@@ -53,7 +54,7 @@ from .models import (
 )
 from .router import ClusterRouter
 from .scheduler import Scheduler
-from .security import new_id, sign_session, verify_password, verify_session
+from .security import hash_password, new_id, sign_session, verify_password, verify_session
 from .store import Store
 from .wg_server import ServerWireGuard
 from .ws_hub import WsHub
@@ -366,6 +367,23 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         expires_at = int(time.time()) + settings.session_ttl_s
         token = sign_session(rec.account_id, settings.session_secret, expires_at)
         return Session(session_token=token, expires_at=_iso(expires_at))
+
+    @app.post("/v1/accounts/{account_id}/password", status_code=204)
+    async def change_password(
+        account_id: str,
+        body: ChangePasswordRequest,
+        authorization: str | None = Header(None),
+    ):
+        session_account = _session_account(authorization)
+        if session_account != account_id:
+            raise ForbiddenError("Cannot change another account's password.")
+        rec = store.get_account(account_id)
+        if rec is None:
+            raise NotFoundError("Account does not exist.")
+        if not verify_password(body.current_password, rec.password_hash):
+            raise UnauthorizedError("Current password is incorrect.")
+        store.set_password(account_id, hash_password(body.new_password))
+        return JSONResponse(status_code=204, content=None)
 
     @app.post("/v1/accounts/{account_id}/keys", response_model=ApiKey, status_code=201)
     async def create_key(account_id: str, body: CreateKeyRequest, authorization: str | None = Header(None)):

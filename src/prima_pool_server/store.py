@@ -657,6 +657,16 @@ class Store:
         row = self._fetch_one("SELECT * FROM accounts WHERE account_id = ?", (account_id,))
         return AccountRecord(**dict(row)) if row else None
 
+    def set_password(self, account_id: str, password_hash: str) -> bool:
+        """Replace an account's password hash. Returns False if the account doesn't exist."""
+        with self._lock:
+            with self._conn:
+                cur = self._conn.execute(
+                    "UPDATE accounts SET password_hash = ? WHERE account_id = ?",
+                    (password_hash, account_id),
+                )
+        return cur.rowcount > 0
+
     # ── api keys ─────────────────────────────────────────────────────────
     def create_api_key(self, account_id: str, name: str, scope: str) -> tuple[ApiKeyRecord, str]:
         secret = security.new_api_key(scope)

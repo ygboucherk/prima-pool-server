@@ -50,6 +50,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class CreateKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     scope: Literal["worker", "user"]

@@ -64,6 +64,33 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /accounts/{account_id}/password:
+    post:
+      tags: [accounts]
+      operationId: changePassword
+      summary: Change the account's password (requires the current password).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Password changed. Existing API keys and sessions remain valid.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /accounts/{account_id}/keys:
     post:
       tags: [accounts]
@@ -821,6 +848,13 @@ components:
         expires_at:
           type: string
           format: date-time
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string, format: password }
+        new_password: { type: string, format: password }
 
     CreateKeyRequest:
       type: object
