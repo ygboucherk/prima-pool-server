@@ -480,17 +480,39 @@
     $('register').hidden = view !== 'register';
   }
 
+  // ── account tab ──────────────────────────────────────────────────────
+  function renderAccount() {
+    if (!overview) return;
+    $('account-username').textContent = overview.username || '—';
+    $('account-id').textContent = overview.account_id || accountId || '—';
+  }
+
+  async function changePassword(current, next) {
+    await api('/v1/accounts/' + accountId + '/password', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: current, new_password: next }),
+    });
+  }
+
+  function setFormMessage(text, cls) {
+    const el = $('cp-message');
+    el.textContent = text;
+    el.className = 'form-message ' + (cls || '');
+    el.hidden = false;
+  }
+
   // ── tabs ─────────────────────────────────────────────────────────────
   function activateTab(name) {
     document.querySelectorAll('.tab-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    for (const id of ['overview', 'usage', 'workers', 'keys', 'cluster']) {
+    for (const id of ['overview', 'usage', 'workers', 'keys', 'account', 'cluster']) {
       $('tab-' + id).hidden = id !== name;
     }
     if (name === 'keys') renderKeys(overview ? overview.keys : []);
     if (name === 'usage') refreshUsageTab();
     if (name === 'workers') refreshWorkersTab();
+    if (name === 'account') renderAccount();
   }
 
   document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -544,6 +566,28 @@
       $('key-name').value = '';
       setStatus('key created', 'ok');
     } catch (err) {
+      handleApiError(err);
+    }
+  });
+
+  $('change-password-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const current = $('cp-current').value;
+    const next = $('cp-new').value;
+    const confirm = $('cp-confirm').value;
+    if (next !== confirm) {
+      setFormMessage('New passwords do not match.', 'err');
+      return;
+    }
+    try {
+      await changePassword(current, next);
+      $('cp-current').value = '';
+      $('cp-new').value = '';
+      $('cp-confirm').value = '';
+      setFormMessage('Password changed.', 'ok');
+      setStatus('password changed', 'ok');
+    } catch (err) {
+      setFormMessage(err.message, 'err');
       handleApiError(err);
     }
   });

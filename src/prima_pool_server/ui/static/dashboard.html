@@ -44,6 +44,7 @@
           <button type="button" class="tab-btn" data-tab="usage">Inference usage</button>
           <button type="button" class="tab-btn" data-tab="workers">Workers</button>
           <button type="button" class="tab-btn" data-tab="keys">API keys</button>
+          <button type="button" class="tab-btn" data-tab="account">Account</button>
         </nav>
       </aside>
 
@@ -114,6 +115,31 @@
             <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
             <tbody id="keys-body"></tbody>
           </table>
+        </section>
+
+        <section id="tab-account" hidden>
+          <h2>Account</h2>
+          <p class="hint">Your account details and password. Changing your password keeps your existing API keys and sessions valid.</p>
+
+          <h3>Account</h3>
+          <table>
+            <thead><tr><th>Username</th><th>Account ID</th></tr></thead>
+            <tbody>
+              <tr>
+                <td id="account-username">—</td>
+                <td><code id="account-id">—</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Change password</h3>
+          <form id="change-password-form" class="key-form">
+            <input type="password" id="cp-current" placeholder="current password" autocomplete="current-password" required>
+            <input type="password" id="cp-new" placeholder="new password (min 8 characters)" autocomplete="new-password" minlength="8" required>
+            <input type="password" id="cp-confirm" placeholder="confirm new password" autocomplete="new-password" minlength="8" required>
+            <button type="submit">Change password</button>
+          </form>
+          <p id="cp-message" class="form-message" hidden></p>
         </section>
 
         <section id="tab-cluster" hidden>

@@ -194,6 +194,16 @@ td { color: #d6dbe6; }
   word-break: break-all;
 }
 
+/* Inline form feedback (e.g. change-password result). */
+.form-message {
+  margin-top: 10px;
+  font-size: 0.85rem;
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+.form-message.ok { background: #1c3a2a; color: #5fd489; }
+.form-message.err { background: #3a1c1c; color: #ff8585; }
+
 /* ── sidebar layout ─────────────────────────────────────────────────── */
 #view {
   display: flex;
