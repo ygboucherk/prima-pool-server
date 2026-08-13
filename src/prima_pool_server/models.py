@@ -55,6 +55,20 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=256)
 
 
+class UpdateAccountPermissionsRequest(BaseModel):
+    """Admin-gated toggle for one account's permissions.
+
+    Each field, when present, sets the account's value; absent fields are left
+    untouched. The request must set at least one field. `is_admin` demotion is
+    guarded by "cannot demote the last admin" in the endpoint.
+    """
+
+    is_admin: bool | None = None
+    can_work: bool | None = None
+    can_use: bool | None = None
+    banned: bool | None = None
+
+
 class CreateKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     scope: Literal["worker", "user"]
@@ -104,6 +118,25 @@ class Account(BaseModel):
     account_id: str
     username: str
     created_at: str
+
+
+class AdminAccount(BaseModel):
+    """Admin view of an account: identity + the four permission booleans."""
+
+    account_id: str
+    username: str
+    is_admin: bool
+    can_work: bool
+    can_use: bool
+    banned: bool
+    created_at: str
+
+
+class PermissionState(BaseModel):
+    """Admin view of the pool-wide permissionless switches."""
+
+    work_permissionless: bool
+    use_permissionless: bool
 
 
 class Session(BaseModel):
@@ -306,6 +339,18 @@ class AccountRecord:
     username: str
     password_hash: str
     created_at: float
+    # Permission model (v0.7): is_admin gates account management; can_work /
+    # can_use gate worker operation / inference; banned is a hard gate that
+    # overrides everything (and, unlike clearing the flags, preserves the
+    # account's prior permissions on unban). New accounts default to
+    # non-admin, can_use + cannot work (a fresh registrant must be granted
+    # can_work by an admin before contributing compute), not banned. NOTE the
+    # v0.7 migration backfills EXISTING rows differently (can_work=True, the
+    # historical open-pool behavior) — see store._migrate_schema.
+    is_admin: bool = False
+    can_work: bool = False
+    can_use: bool = True
+    banned: bool = False
 
 
 @dataclass

@@ -204,6 +204,19 @@ td { color: #d6dbe6; }
 .form-message.ok { background: #1c3a2a; color: #5fd489; }
 .form-message.err { background: #3a1c1c; color: #ff8585; }
 
+/* Admin account table toggle buttons. */
+.admin-toggle {
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  margin-right: 4px;
+  border-radius: 10px;
+  border: 1px solid #273049;
+  background: none;
+  color: #aab4c8;
+  cursor: pointer;
+}
+.admin-toggle:hover { border-color: #3a4459; color: #e6e9f0; }
+
 /* ── sidebar layout ─────────────────────────────────────────────────── */
 #view {
   display: flex;

@@ -47,6 +47,54 @@ Out of scope for v0: worker-side crediting (the other half of accounting),
 eviction/rebalance (churn), and automatic relay orchestration (a manual relay
 deployment is documented in the setup guide Part 6).
 
+## Accounts & permissions
+
+Each account carries four booleans:
+
+- `is_admin` — can manage other accounts (admin panel + `/v1/admin/*`).
+- `can_work` — may register/operate workers.
+- `can_use` — may send inference requests.
+- `banned` — a hard gate that overrides everything (login, sessions, API keys,
+  and the WS channel all reject a banned account). Unbanning restores the
+  account's prior flags automatically.
+
+A newly registered account defaults to `can_use = true` and `can_work = false`
+— anyone can consume inference, but contributing compute requires an admin to
+grant `can_work`. (Pre-existing accounts upgraded from before the permission
+model keep `can_work = true`, the historical open-pool behavior.)
+
+Effective capabilities are:
+
+```
+can_work = (not banned) and (can_work or PRIMA_POOL_WORK_PERMISSIONLESS)
+can_use  = (not banned) and (can_use  or PRIMA_POOL_USE_PERMISSIONLESS)
+```
+
+Both `*_PERMISSIONLESS` switches default to `true` when unset. When set to
+`false`, an account needs its own flag enabled (by an admin) to use that
+capability. Note the interplay with the account defaults: with
+`PRIMA_POOL_WORK_PERMISSIONLESS=false` and the default `can_work=false`, only
+accounts an admin has granted `can_work` can register workers.
+
+The first admin is bootstrapped from `PRIMA_POOL_FIRST_ACCOUNT=username:password`
+on startup, **iff** no admin account exists yet (idempotent; it never clobbers
+an existing account or re-promotes a demoted admin).
+
+Admins manage accounts via the GUI's **Admin** tab (visible only to admins) or
+the API:
+
+- `GET /v1/admin/permissions` — current permissionless switches
+- `GET /v1/admin/accounts` — all accounts + their flags
+- `PATCH /v1/admin/accounts/{account_id}` — toggle `is_admin`/`can_work`/`can_use`/`banned`
+
+Guards: demoting the **last** admin is rejected (the pool must always have one).
+Self-demotion is allowed as long as another admin remains.
+
+> **Note (rate limiting out of scope):** with `PRIMA_POOL_USE_PERMISSIONLESS=true`
+> (the default), there is no admission control on `/v1/chat/completions` beyond
+> a valid user key — accounting logs usage but there are no quotas yet. This is
+> fine for a trusted pool; rate limiting is a future enhancement.
+
 ## GUI
 
 A static (no server-side templating) dashboard is served at `/ui`. It uses the
@@ -204,6 +252,9 @@ All settings are read from `PRIMA_POOL_*` environment variables. See
 | `PRIMA_POOL_HEARTBEAT_INTERVAL_S` | `10` | Suggested heartbeat cadence |
 | `PRIMA_POOL_ASSIGNABLE_GRACE_S` | `5` | Grace period before a re-added worker is assignable |
 | `PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT` | `5` | Worker cap per account |
+| `PRIMA_POOL_WORK_PERMISSIONLESS` | unset (`true`) | When unset, any non-banned account may operate workers; set `false` to gate on each account's `can_work` flag |
+| `PRIMA_POOL_USE_PERMISSIONLESS` | unset (`true`) | When unset, any non-banned account may use inference; set `false` to gate on each account's `can_use` flag |
+| `PRIMA_POOL_FIRST_ACCOUNT` | unset | First-admin bootstrap `username:password`, created on startup iff no admin exists |
 | `PRIMA_POOL_WG_MTU` | `1280` | WireGuard MTU |
 | `PRIMA_POOL_RELAY_ENABLED` | `false` | Relay fallback enabled (see setup guide Part 6) |
 | `PRIMA_POOL_RELAY_PUBKEY` | — | Relay's WireGuard public key |

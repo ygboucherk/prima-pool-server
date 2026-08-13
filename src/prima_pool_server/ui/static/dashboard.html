@@ -45,6 +45,7 @@
           <button type="button" class="tab-btn" data-tab="workers">Workers</button>
           <button type="button" class="tab-btn" data-tab="keys">API keys</button>
           <button type="button" class="tab-btn" data-tab="account">Account</button>
+          <button type="button" class="tab-btn" data-tab="admin" id="admin-tab-btn" hidden>Admin</button>
         </nav>
       </aside>
 
@@ -140,6 +141,27 @@
             <button type="submit">Change password</button>
           </form>
           <p id="cp-message" class="form-message" hidden></p>
+        </section>
+
+        <section id="tab-admin" hidden>
+          <h2>Admin</h2>
+          <p class="hint">Manage accounts: promote/demote admins, toggle worker &amp; inference permissions, and ban users.</p>
+
+          <h3>Permissionless switches</h3>
+          <table>
+            <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+            <tbody>
+              <tr><td>Work permissionless</td><td id="admin-work-perm">—</td></tr>
+              <tr><td>Use permissionless</td><td id="admin-use-perm">—</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Accounts</h3>
+          <table>
+            <thead><tr><th>Username</th><th>Admin</th><th>Can work</th><th>Can use</th><th>Banned</th><th>Actions</th></tr></thead>
+            <tbody id="admin-accounts-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+          </table>
+          <p id="admin-message" class="form-message" hidden></p>
         </section>
 
         <section id="tab-cluster" hidden>

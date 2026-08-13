@@ -113,6 +113,8 @@
       $('stat-workers').textContent = data.workers.length;
       $('stat-online').textContent = data.workers.filter((w) => w.online).length;
       $('stat-keys').textContent = data.keys.length;
+      // Show the admin tab only for admins.
+      $('admin-tab-btn').hidden = !data.is_admin;
       buildWorkerMemoryMap();
       renderWorkers(data.workers);
       renderKeys(data.keys);
@@ -509,18 +511,105 @@
     el.hidden = false;
   }
 
+  // ── admin tab ───────────────────────────────────────────────────────
+  // Escape user-controlled strings before injecting into innerHTML. Usernames
+  // (and key names) are arbitrary user input, so this prevents stored XSS in
+  // the admin accounts table.
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  function badge(on) {
+    return on
+      ? '<span class="badge online">yes</span>'
+      : '<span class="badge offline">no</span>';
+  }
+
+  function renderAdminAccounts(accounts) {
+    const tbody = $('admin-accounts-body');
+    tbody.innerHTML = '';
+    if (!accounts.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No accounts</td></tr>';
+      return;
+    }
+    for (const a of accounts) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(a.username)}</td>
+        <td>${badge(a.is_admin)}</td>
+        <td>${badge(a.can_work)}</td>
+        <td>${badge(a.can_use)}</td>
+        <td>${badge(a.banned)}</td>
+        <td>
+          <button type="button" class="admin-toggle" data-field="is_admin" data-account="${a.account_id}" data-val="${a.is_admin}">${a.is_admin ? 'demote' : 'promote'}</button>
+          <button type="button" class="admin-toggle" data-field="can_work" data-account="${a.account_id}" data-val="${a.can_work}">${a.can_work ? 'revoke work' : 'allow work'}</button>
+          <button type="button" class="admin-toggle" data-field="can_use" data-account="${a.account_id}" data-val="${a.can_use}">${a.can_use ? 'revoke use' : 'allow use'}</button>
+          <button type="button" class="admin-toggle" data-field="banned" data-account="${a.account_id}" data-val="${a.banned}">${a.banned ? 'unban' : 'ban'}</button>
+        </td>`;
+      tr.querySelectorAll('.admin-toggle').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const field = btn.dataset.field;
+          const next = btn.dataset.val !== 'true';
+          toggleAccountPermission(btn.dataset.account, field, next);
+        });
+      });
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function refreshAdminTab() {
+    if (!overview || !overview.is_admin) return;
+    try {
+      const [perm, accounts] = await Promise.all([
+        api('/v1/admin/permissions'),
+        api('/v1/admin/accounts'),
+      ]);
+      $('admin-work-perm').textContent = perm.work_permissionless ? 'true' : 'false';
+      $('admin-use-perm').textContent = perm.use_permissionless ? 'true' : 'false';
+      renderAdminAccounts(accounts);
+    } catch (e) {
+      handleApiError(e);
+    }
+  }
+
+  async function toggleAccountPermission(accountId, field, value) {
+    const body = {};
+    body[field] = value;
+    try {
+      await api('/v1/admin/accounts/' + accountId, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      setAdminMessage('Updated.', 'ok');
+      await refreshAdminTab();
+    } catch (e) {
+      setAdminMessage(e.message, 'err');
+      handleApiError(e);
+    }
+  }
+
+  function setAdminMessage(text, cls) {
+    const el = $('admin-message');
+    el.textContent = text;
+    el.className = 'form-message ' + (cls || '');
+    el.hidden = false;
+  }
+
   // ── tabs ─────────────────────────────────────────────────────────────
   function activateTab(name) {
     document.querySelectorAll('.tab-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    for (const id of ['overview', 'usage', 'workers', 'keys', 'account', 'cluster']) {
+    for (const id of ['overview', 'usage', 'workers', 'keys', 'account', 'admin', 'cluster']) {
       $('tab-' + id).hidden = id !== name;
     }
     if (name === 'keys') renderKeys(overview ? overview.keys : []);
     if (name === 'usage') refreshUsageTab();
     if (name === 'workers') refreshWorkersTab();
     if (name === 'account') renderAccount();
+    if (name === 'admin') refreshAdminTab();
   }
 
   document.querySelectorAll('.tab-btn').forEach((btn) => {
