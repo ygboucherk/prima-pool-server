@@ -24,12 +24,12 @@ authenticated, negotiated peers.
 
 | Role          | In one line                                                              | Details                          |
 | ------------- | ------------------------------------------------------------------------ | -------------------------------- |
-| **Account**   | An identity (username + password) owning scoped API keys + future balance | [negotiation.md](negotiation.md) |
-| **API key**   | A credential scoped to `worker` (provide compute) or `user` (send requests) | [negotiation.md](negotiation.md#3-scoped-api-keys) |
-| **Worker**    | A device that logs in with a worker key, declares a model, joins clusters | [negotiation.md](negotiation.md#4-worker-device-registration) |
+| **Account**   | An identity (username + password) at one of two levels — **admin** (manages accounts) or **user** (works/uses compute) — owning scoped API keys | [negotiation.md](negotiation.md#1-account-permissions-adminuser) |
+| **API key**   | A credential scoped to `worker` (provide compute) or `user` (send requests) | [negotiation.md](negotiation.md#4-scoped-api-keys) |
+| **Worker**    | A device that logs in with a worker key, declares a model, joins clusters | [negotiation.md](negotiation.md#5-worker-device-registration) |
 | **Liveness**  | `online`/`offline`, heartbeat-driven, orthogonal to registration          | [tunnel.md](tunnel.md#2-health-tracking-server-side) |
 | **Cluster**   | An *ordered* group of workers (a ring) serving one model                  | [assignment.md](assignment.md#3-cluster-config-wireguard) |
-| **Pool server**| The control plane: identities, waitlists, cluster formation, relay orchestration | [negotiation.md](negotiation.md#5-waitlist-and-cluster-formation) |
+| **Pool server**| The control plane: identities, waitlists, cluster formation, relay orchestration | [negotiation.md](negotiation.md#6-waitlist-and-cluster-formation) |
 | **Relay node**| A dedicated, publicly reachable WG relay for NAT'd members                 | [tunnel.md](tunnel.md#4-direct-first-relay-fallback-tunnel-details) |
 
 ## Scope (v0)
@@ -37,11 +37,12 @@ authenticated, negotiated peers.
 | In scope                                                  | Out of scope (v1+)                                   |
 | --------------------------------------------------------- | ---------------------------------------------------- |
 | Account registration (username + password)                | Usage reporting & accounting endpoints               |
+| **Account permissions (admin/user + can_work/can_use/ban)** |                                                     |
 | Scoped API key creation (worker / user)                   | Server-initiated eviction / rebalancing (churn)      |
 | Worker device registration via worker key                 | NAT traversal beyond WG + STUN self-report           |
 | Per-model waitlists, cluster formation                    | Signed/verifiable usage reports                      |
 | Cluster assignment (WS push) + config retrieval           | Payment / billing                                   |
-| WireGuard tunnel bring-up (direct-first, relay fallback)  | Model registry management (admin)                    |
+| WireGuard tunnel bring-up (direct-first, relay fallback)  |                                                      |
 | Readiness handshake, heartbeat, liveness                  |                                                      |
 | Multiple workers per account (one device == one worker)   |                                                      |
 | Offline workers: removed from waitlist, re-added on return |                                                     |
@@ -98,7 +99,7 @@ Every state is observable via `GET /v1/workers/{id}/state`, so a daemon can alwa
 
 - API is versioned: `/v1/...`. Breaking changes bump the major version.
 - All timestamps are RFC 3339 UTC.
-- Errors use RFC 7807 `application/problem+json` (see [negotiation.md](negotiation.md#8-errors)).
-- Suggested default cadences live in [negotiation.md](negotiation.md#6-cadence-and-timeouts-suggested-defaults).
+- Errors use RFC 7807 `application/problem+json` (see [negotiation.md](negotiation.md#9-errors)).
+- Suggested default cadences live in [negotiation.md](negotiation.md#7-cadence-and-timeouts-suggested-defaults).
 - **Transport**: all control-plane traffic is HTTPS/WSS — credentials, API keys, and session
   tokens must never transit plaintext. There is no HTTP fallback.

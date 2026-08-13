@@ -21,7 +21,47 @@ Account (username + password)  ── owns ──▶  scoped API keys
   model before it can join anything. So the model is a property of the **worker**, not of the
   account.
 
-## 1. Account registration
+## 1. Account permissions (admin/user)
+
+Accounts are **two-level** and carry four booleans:
+
+| Field       | Meaning                                                                 |
+| ----------- | ----------------------------------------------------------------------- |
+| `is_admin`  | Can manage other accounts (admin panel + `/v1/admin/*`).                 |
+| `can_work`  | May register/operate workers.                                            |
+| `can_use`   | May send inference requests.                                             |
+| `banned`    | Hard gate overriding everything (login, sessions, keys, WS).             |
+
+A **new account** defaults to `can_use = true` and `can_work = false` — anyone may
+consume inference, but contributing compute requires an admin to grant `can_work`.
+(Accounts upgraded from before the permission model keep `can_work = true`.)
+
+Effective capabilities are:
+
+```
+effective_can_work = (not banned) and (can_work or PRIMA_POOL_WORK_PERMISSIONLESS)
+effective_can_use  = (not banned) and (can_use  or PRIMA_POOL_USE_PERMISSIONLESS)
+```
+
+Both `*_PERMISSIONLESS` switches default to `true` when unset (the historical open
+pool); set one to `false` to gate that axis on the per-account flag. Unbanning
+restores the account's prior flags (ban is independent of the flags, so it never
+loses them).
+
+There is no self-serve promotion: admin-gated endpoints require an existing admin.
+The **first** admin is seeded via `PRIMA_POOL_FIRST_ACCOUNT=username:password` on
+startup, iff no admin exists yet. Admin management endpoints:
+
+- `GET /v1/admin/permissions` — the two permissionless switches.
+- `GET /v1/admin/accounts` — all accounts, their flags, and effective capabilities.
+- `PATCH /v1/admin/accounts/{account_id}` — partial toggle of `is_admin`/`can_work`/`can_use`/`banned`; demoting the last admin is rejected.
+
+Enforcement is at **action boundaries**: worker registration checks `effective_can_work`,
+inference checks `effective_can_use`, and login/sessions/keys/WS reject a banned
+account. Existing sessions/keys are not invalidated by a flag change — the account is
+re-read on every request, so a toggle takes effect on the next request.
+
+## 2. Account registration
 
 ### `POST /v1/accounts/register`
 
@@ -53,7 +93,7 @@ Account (username + password)  ── owns ──▶  scoped API keys
 
 The password is stored hashed (e.g. bcrypt/argon2); it is never returned.
 
-## 2. Login (session token)
+## 3. Login (session token)
 
 To manage API keys, the account logs in and receives a short-lived session token.
 
@@ -78,7 +118,7 @@ dual-auth — to access workers the session's account owns (see
 [assignment.md](assignment.md#authorization)). Session tokens embed the `account_id` and are
 short-lived (default 1 h). Worker devices use worker-scoped API keys, not session tokens.
 
-## 3. Scoped API keys
+## 4. Scoped API keys
 
 ### `POST /v1/accounts/{account_id}/keys`  (auth: session token)
 
@@ -118,7 +158,7 @@ going offline**: an offline worker keeps its key and can return; a revoked key c
 
 **Success — `204 No Content`**
 
-## 4. Worker device registration
+## 5. Worker device registration
 
 A device that wants to provide compute logs in with a **worker-scoped key**. This creates a worker
 entity and adds it to `model.waitlist`.
@@ -201,7 +241,7 @@ also removes it from the cluster (churn is v1+; see [churn.md](churn.md)).
 **Errors** — `404 not_found` if the worker doesn't exist; `409 worker_in_use` if the worker is
 currently part of an active cluster (v1+).
 
-## 5. Waitlist and cluster formation
+## 6. Waitlist and cluster formation
 
 - The server maintains a **per-(model, gguf_sha256) waitlist** of workers with
   `status: waitlisted`. Because every node must hold a copy of the exact same model weights,
@@ -232,7 +272,7 @@ dissolve on idle.
 The waitlist condition is the only trigger for cluster formation in v0. Rebalance without full
 dissolution is v1+ (see [churn.md](churn.md)).
 
-## 6. Cadence and timeouts (suggested defaults)
+## 7. Cadence and timeouts (suggested defaults)
 
 | Item                      | Default    | Notes                                        |
 | ------------------------- | ---------- | -------------------------------------------- |
@@ -244,7 +284,7 @@ dissolution is v1+ (see [churn.md](churn.md)).
 These are defaults; the server may push its preferred cadence in a `hello` frame after the WS
 handshake.
 
-## 7. Abuse model & rate limiting
+## 8. Abuse model & rate limiting
 
 - **Login brute-force**: `POST /accounts/login` must be rate-limited and/or throttle on repeated
   failures (e.g. per-IP + per-username backoff). A `429 too_many_requests` problem response is
@@ -254,9 +294,9 @@ handshake.
 - **Heartbeat flood**: heartbeats are cheap but unauthenticated rate-limiting is not needed (they
   are key-authenticated); still, the server may enforce a per-worker minimum heartbeat interval.
 - These are enforcement notes for the server implementation; the protocol itself only needs the
-  `429` error response defined (RFC 7807, as in §8).
+  `429` error response defined (RFC 7807, as in §9).
 
-## 8. Errors
+## 9. Errors
 
 All errors are `application/problem+json` (RFC 7807):
 
