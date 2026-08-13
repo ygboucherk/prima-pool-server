@@ -15,7 +15,10 @@ On receiving `cluster_config`, the worker:
    - Optionally a relay `[Peer]` (see §3).
 2. Brings the interface up (`wg-quick up` or equivalent).
 3. Joins the prima.cpp cluster using the member addresses (`10.23.<cluster_id>.<n>`).
-4. Calls `POST /v1/clusters/{id}/ready`.
+4. Calls `POST /v1/clusters/{id}/ready`. The HEAD additionally reports its per-worker layer
+   distribution (Halda) — over the WS `layer_distribution` frame and/or in the `ready` body — and
+   the cluster only goes live once that distribution has been received (see
+   [assignment.md](assignment.md#5-readiness-handshake)).
 
 The worker MUST NOT reuse a WireGuard key across clusters concurrently; each cluster assignment
 gets a fresh keypair (or the same keypair is permitted only if the server supports one-interface

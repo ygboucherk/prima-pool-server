@@ -54,7 +54,14 @@ class Scheduler:
         assigned IP (a dissolved cluster's members may still have their WG
         interface up with the old IP until they process cluster_dissolved).
         """
-        used = {c.subnet for c in self.store.list_clusters()}
+        # Only live/assembling clusters hold an active subnet. Terminated
+        # clusters' subnets are freed for reuse: their members' assigned IPs
+        # are cleared on dissolution, so nothing references them anymore.
+        used = {
+            c.subnet
+            for c in self.store.list_clusters()
+            if c.status != ClusterStatus.terminated
+        }
         base = self.settings.cluster_subnet_prefix
         # Collect subnets still referenced by any worker's assigned IP.
         for w in self.store.list_workers():
@@ -207,7 +214,13 @@ class Scheduler:
         return cluster
 
     def _dissolve_cluster(self, cluster: ClusterRecord, reason: str) -> None:
-        """Return all members to the waitlist and notify them."""
+        """Return all members to the waitlist and mark the cluster terminated.
+
+        The cluster row is retained (status=terminated) rather than deleted so
+        its history survives for accounting/auditing — e.g. the `requests`
+        table references it, and future worker crediting needs to know which
+        members hosted each request.
+        """
         member_ids = list(cluster.members)
         for wid in member_ids:
             w = self.store.get_worker(wid)
@@ -218,8 +231,9 @@ class Scheduler:
             w.assigned_ip = None
             w.ring_position = None
             self.store.update_worker(w)
-        self.store.delete_cluster(cluster.cluster_id)
-        logger.info("dissolved cluster %s (%s)", cluster.cluster_id, reason)
+        cluster.status = ClusterStatus.terminated
+        self.store.update_cluster(cluster)
+        logger.info("terminated cluster %s (%s)", cluster.cluster_id, reason)
         # Option A: the server leaves the cluster's WG network.
         if self.wg_server.enabled:
             try:
@@ -252,12 +266,30 @@ class Scheduler:
                 self._dissolve_cluster(cluster, "member_left")
 
     def on_ready(self, cluster_id: str, worker_id: str) -> ClusterStatus:
-        """Record a member's readiness. Returns the cluster status."""
-        cluster = self.store.get_cluster(cluster_id)
+        """Record a member's readiness. Returns the cluster status.
+
+        Delegates to the store's atomic `mark_member_ready` so the ready-set
+        update and the liveness gate run under the RLock — two concurrent
+        ready reports can't lose each other, and a dissolve racing a ready
+        report can't resurrect a terminated cluster (the gate refuses it).
+        """
+        cluster = self.store.mark_member_ready(cluster_id, worker_id)
         if cluster is None:
             raise KeyError(cluster_id)
-        cluster.ready.add(worker_id)
-        if len(cluster.ready) >= len(cluster.members):
-            cluster.status = ClusterStatus.live
-        self.store.update_cluster(cluster)
+        return cluster.status
+
+    def on_layer_distribution(self, cluster_id: str, layer_windows: dict[str, int] | None) -> ClusterStatus:
+        """Record the head's layer-distribution report.
+
+        Only the head (rank 0 / ring_position 0) is expected to send this.
+        An EMPTY dict ({}) is the 'reported unknown' marker (parse failure) and
+        must still satisfy the liveness gate — only None ('not reported')
+        blocks it. Returns the cluster status.
+
+        Delegates to the store's atomic `set_cluster_distribution` (same
+        race-free read-modify-write under the RLock as `mark_member_ready`).
+        """
+        cluster = self.store.set_cluster_distribution(cluster_id, layer_windows)
+        if cluster is None:
+            raise KeyError(cluster_id)
         return cluster.status

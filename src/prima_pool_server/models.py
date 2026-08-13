@@ -22,6 +22,9 @@ class WorkerStatus(str, Enum):
 class ClusterStatus(str, Enum):
     assembling = "assembling"
     live = "live"
+    # Terminal state: the cluster has been dissolved (a member went offline or
+    # left). The row is retained for history/accounting rather than deleted.
+    terminated = "terminated"
 
 
 class NatType(str, Enum):
@@ -80,9 +83,15 @@ class RegisterWorkerRequest(BaseModel):
 
 
 class ReportReadyRequest(BaseModel):
-    """Empty body; the caller is identified by the worker-scoped API key."""
+    """Readiness report. The caller is identified by the worker-scoped API key.
 
-    pass
+    `layer_windows` (rank-keyed: rank -> layer count) is OPTIONAL and only
+    meaningful from the head (rank 0): it carries the Halda allocation so the
+    server can record it even if the WS distribution frame was lost. Workers
+    leave it unset.
+    """
+
+    layer_windows: dict[str, int] | None = None
 
 
 # ── Response schemas ─────────────────────────────────────────────────────
@@ -182,6 +191,109 @@ class ClusterStatusResponse(BaseModel):
     members_total: int
 
 
+class WorkerInfo(BaseModel):
+    """Public worker info (unauthenticated, deliberately minimal).
+
+    Exposes only class-level, anonymized data: the worker id (already known
+    to the caller), the advertised RAM pool share, and the model the worker
+    serves. NO account id, NO endpoint/WG/IP data, NO availability history —
+    those stay behind auth.
+
+    memory_allocated_mb is the share the worker ADVERTISED at registration
+    (updated on re-registration of the same device) — it is a stable capacity
+    signal, NOT live free RAM (which would leak availability patterns).
+
+    Future hardware stats must stay class-level (e.g. device class, CPU
+    family) and must NOT become instance fingerprints (exact CPU model
+    strings, OS versions) — this endpoint is public.
+    """
+
+    worker_id: str
+    model: str
+    memory_allocated_mb: int
+
+
+class ClusterMemberInfo(BaseModel):
+    """One member of a cluster, as shown in the public cluster info.
+
+    Anonymized: worker_id is an opaque random id (no owner, no endpoint).
+    """
+
+    worker_id: str
+    layer_window: int | None = None
+
+
+class ClusterInfo(BaseModel):
+    """Public cluster info (unauthenticated, deliberately minimal).
+
+    Exposes the member list (in ring order, index 0 = head) and the layer
+    distribution per worker — the "what kind of machines ran my prompt"
+    amazement. NO account ids, NO WG IPs, NO endpoint data.
+
+    layer_window may be None (head has not reported a distribution yet) or 0
+    (a pure forwarder — a valid value, not "no data").
+    """
+
+    cluster_id: str
+    model: str
+    status: ClusterStatus
+    members: list[ClusterMemberInfo]
+
+
+class RequestLogEntry(BaseModel):
+    """A single logged inference request (user-facing view)."""
+
+    request_id: str
+    model: str
+    cluster_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    created_at: float
+
+
+class UsageStatsRequest(BaseModel):
+    """A list of (begin, end) time windows to aggregate usage over."""
+
+    windows: list[tuple[float, float]]
+
+
+class ModelUsage(BaseModel):
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+
+
+class WorkerLogEntry(BaseModel):
+    """A single inference request attributed to one of the account's workers.
+
+    A request served by a cluster appears once per worker the account owns in
+    that cluster. `share` is the worker's layer share (layer_window / total
+    layers across the whole cluster); `effective_*` = token count * share.
+    `share`/`effective_*` are None when the cluster's layer distribution is
+    unknown (or this worker's window is missing from the report). A forwarder
+    (layer_window 0) has share 0.0 and effective 0.0.
+    """
+
+    request_id: str
+    worker_id: str
+    model: str
+    cluster_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    share: float | None
+    effective_prompt: float | None
+    effective_completion: float | None
+    created_at: float
+
+
+class WorkerStatsRequest(BaseModel):
+    """A list of (begin, end) windows to aggregate worker usage over, with an
+    optional worker_id filter (intersected with the account's owned workers)."""
+
+    windows: list[tuple[float, float]]
+    worker_ids: list[str] | None = None
+
+
 # ── Domain dataclasses (internal state) ──────────────────────────────────
 @dataclass
 class AccountRecord:
@@ -265,3 +377,29 @@ class ClusterRecord:
     created_at: float = field(default_factory=time.time)
     # worker_id -> assigned private IP
     ips: dict[str, str] = field(default_factory=dict)
+    # worker_id -> number of model layers assigned by prima.cpp (Halda) at
+    # cluster formation. Reported by the head once its process is ready:
+    #   - world > 1: parsed from the head's stdout "Allocation Strategy" table
+    #   - world == 1: the head reports it handles all layers (100% of the work)
+    # `None` means the head has not reported a distribution yet (required for
+    # the cluster to go live, so a live cluster always carries one).
+    layer_windows: dict[str, int] | None = None
+
+
+@dataclass
+class RequestRecord:
+    """A single inference request logged for accounting (user-side, v0).
+
+    Captured by the proxy in `chat_completions`. Token counts come from the
+    upstream llama-server `usage` object; for streaming requests they are
+    parsed from the final SSE chunk before `data: [DONE]`.
+    """
+
+    request_id: str
+    account_id: str
+    key_id: str
+    model: str
+    cluster_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    created_at: float = field(default_factory=time.time)

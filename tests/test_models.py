@@ -77,7 +77,7 @@ def test_models_endpoint_live_flag(client: TestClient):
     client.post(f"/v1/workers/{w2['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {k2}"})
     st = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {k1}"}).json()
     cid = st["cluster"]["cluster_id"]
-    client.post(f"/v1/clusters/{cid}/ready", headers={"Authorization": f"Bearer {k1}"}, json={})
+    client.post(f"/v1/clusters/{cid}/ready", headers={"Authorization": f"Bearer {k1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     client.post(f"/v1/clusters/{cid}/ready", headers={"Authorization": f"Bearer {k2}"}, json={})
 
     body = client.get("/v1/models").json()

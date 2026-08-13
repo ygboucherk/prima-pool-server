@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from prima_pool_server.app import create_app
 from prima_pool_server.config import ModelDef, Settings
+from prima_pool_server.models import ClusterRecord, ClusterStatus
 from prima_pool_server.store import Store
 
 
@@ -309,8 +310,9 @@ def test_same_account_two_workers_same_cluster_both_ready(client: TestClient):
     assert cfg1.json()["interface"]["private_ip"] == st1["cluster"]["assigned_ip"]
     assert cfg2.json()["interface"]["private_ip"] == st2["cluster"]["assigned_ip"]
 
-    # Both report ready → live (each with its own key).
-    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    # Both report ready → live (each with its own key). The head (key1)
+    # carries the layer distribution, required for the cluster to go live.
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     assert r1.status_code == 202 and r1.json()["status"] == "assembling", r1.text
     r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     assert r2.status_code == 202, r2.text
@@ -360,7 +362,7 @@ def test_unbound_keys_self_heal_on_heartbeat(client: TestClient, store: Store):
     assert cfg2.status_code == 200, cfg2.text
 
     # Both report ready → live.
-    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     assert r2.json()["status"] == "live", r2.text
     assert r2.json()["members_ready"] == 2
@@ -378,20 +380,44 @@ def test_cluster_ready_and_live(client: TestClient):
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     cluster_id = st1["cluster"]["cluster_id"]
 
-    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={})
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {"0": 24, "1": 24}})
     assert r1.status_code == 202
     assert r1.json()["status"] == "assembling"
     r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
     assert r2.json()["status"] == "live"
 
 
-def test_worker_leave_dissolves_cluster(client: TestClient):
+def test_cluster_ready_live_with_unknown_distribution(client: TestClient, store: Store):
+    """An EMPTY layer_windows ({} = "unknown", parse failure) must still let
+    the cluster go live — liveness must never be blocked by a log parse."""
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+    for key, w in ((key1, w1), (key2, w2)):
+        client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    cluster_id = st1["cluster"]["cluster_id"]
+
+    # Head reports "unknown" distribution (empty dict) via REST.
+    r1 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key1}"}, json={"layer_windows": {}})
+    assert r1.status_code == 202
+    assert r1.json()["status"] == "assembling"
+    r2 = client.post(f"/v1/clusters/{cluster_id}/ready", headers={"Authorization": f"Bearer {key2}"}, json={})
+    assert r2.json()["status"] == "live", r2.text
+
+    # The distribution field is recorded as unknown (empty dict).
+    cluster = store.get_cluster(cluster_id)
+    assert cluster is not None
+    assert cluster.layer_windows == {}
+
+
+def test_worker_leave_dissolves_cluster(client: TestClient, store: Store):
     key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
     key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
     for key, w in ((key1, w1), (key2, w2)):
         client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "assigned"
+    cluster_id = st1["cluster"]["cluster_id"]
 
     # w2 leaves -> cluster dissolves, w1 returns to waitlist.
     r = client.delete(f"/v1/workers/{w2['worker_id']}", headers={"Authorization": f"Bearer {key2}"})
@@ -399,6 +425,41 @@ def test_worker_leave_dissolves_cluster(client: TestClient):
     st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
     assert st1["status"] == "waitlisted"
     assert st1["cluster"] is None
+
+    # The cluster row is retained (not deleted) and marked terminated, so its
+    # history survives for accounting/auditing.
+    cluster = store.get_cluster(cluster_id)
+    assert cluster is not None
+    assert cluster.status.value == "terminated"
+
+
+def test_terminated_cluster_subnet_is_reused(store: Store):
+    """A terminated cluster's subnet must be freed for reuse.
+
+    Since terminated clusters are retained forever, their subnets must not
+    count as 'used' — otherwise the 255-subnet pool would eventually exhaust
+    and block all future cluster formation.
+    """
+    from prima_pool_server.scheduler import Scheduler
+
+    scheduler = Scheduler(store=store, settings=Settings(), hub=None)
+
+    # A live cluster occupies 10.23.1.0/24.
+    live = ClusterRecord(
+        cluster_id="clu_live",
+        model="demo-model",
+        subnet="10.23.1.0/24",
+        members=["w1"],
+        ips={"w1": "10.23.1.1"},
+        status=ClusterStatus.live,
+    )
+    store.create_cluster(live)
+    assert scheduler._next_subnet() == "10.23.2.0/24"
+
+    # Terminate it: the subnet is freed for reuse.
+    live.status = ClusterStatus.terminated
+    store.update_cluster(live)
+    assert scheduler._next_subnet() == "10.23.1.0/24"
 
 
 def test_worker_key_cannot_access_other_worker(client: TestClient):
@@ -514,3 +575,111 @@ def test_session_token_can_fetch_cluster_config_as_member(client: TestClient):
     )
     assert r.status_code == 200
     assert r.json()["cluster_id"] == cluster_id
+
+
+# ── public info endpoints (unauthenticated) ──────────────────────────────
+def _form_live_cluster(client: TestClient) -> tuple[dict, dict, str, str, str]:
+    """Register two workers (different accounts), form a cluster, report
+    readiness (with a layer distribution from the head) so it goes live.
+
+    Returns (w1, w2, cluster_id, key1, key2).
+    """
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+    for key, w in ((key1, w1), (key2, w2)):
+        client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    assert st1["status"] == "assigned", st1
+    cluster_id = st1["cluster"]["cluster_id"]
+    # Head (rank 0) reports its layer distribution + readiness; worker reports readiness.
+    r = client.post(
+        f"/v1/clusters/{cluster_id}/ready",
+        headers={"Authorization": f"Bearer {key1}"},
+        json={"layer_windows": {"0": 20, "1": 10}},
+    )
+    assert r.status_code == 202, r.text
+    r = client.post(
+        f"/v1/clusters/{cluster_id}/ready",
+        headers={"Authorization": f"Bearer {key2}"},
+        json={},
+    )
+    assert r.status_code == 202, r.text
+    return w1, w2, cluster_id, key1, key2
+
+
+def test_worker_info_unauthenticated(client: TestClient):
+    """/v1/workers/{id}/info is public and returns the advertised RAM pool share."""
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    w = _register_worker(client, key, wg_pubkey="pubkey1", memory_mb=2048).json()
+    # No auth header at all.
+    r = client.get(f"/v1/workers/{w['worker_id']}/info")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["worker_id"] == w["worker_id"]
+    assert body["memory_allocated_mb"] == 2048
+    # Minimal by design: no account_id, no endpoint, no online status.
+    assert "account_id" not in body
+    assert "endpoint" not in body
+    assert "online" not in body
+
+
+def test_worker_info_memory_updated_by_reregistration(client: TestClient):
+    """The advertised share is set at registration; re-registering the same
+    device (same WG pubkey) updates it in place, and /info reflects it."""
+    key, w = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    # Re-register (same device) with a different advertised share.
+    r = client.post(
+        "/v1/workers/register",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "demo-model",
+            "gguf_sha256": "a" * 64,
+            "memory_allocated_mb": 8192,
+            "wg_pubkey": "pubkey1",
+            "endpoint": {"host": "203.0.113.10", "port": 51820, "behind_nat": False, "nat_type": "none"},
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = client.get(f"/v1/workers/{w['worker_id']}/info").json()
+    assert body["memory_allocated_mb"] == 8192
+
+
+def test_worker_info_missing_worker_404(client: TestClient):
+    assert client.get("/v1/workers/wrk_nonexistent/info").status_code == 404
+
+
+def test_cluster_info_unauthenticated_members_and_layers(client: TestClient):
+    """/v1/clusters/{id}/info is public; members in ring order with layer windows."""
+    w1, w2, cluster_id, key1, key2 = _form_live_cluster(client)
+    r = client.get(f"/v1/clusters/{cluster_id}/info")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cluster_id"] == cluster_id
+    assert body["status"] == "live"
+    assert body["model"] == "demo-model"
+    assert [m["worker_id"] for m in body["members"]] == [w1["worker_id"], w2["worker_id"]]
+    assert [m["layer_window"] for m in body["members"]] == [20, 10]
+    # Minimal by design: no account ids, no IPs.
+    assert all("account_id" not in m for m in body["members"])
+    assert all("assigned_ip" not in m for m in body["members"])
+
+
+def test_cluster_info_before_distribution_reports_none(client: TestClient):
+    """A cluster that has formed but not yet reported a distribution shows
+    layer_window=None for every member (distinct from 0 = forwarder)."""
+    key1, w1 = _new_worker_account(client, "alice", "pubkey1", memory_mb=2048)
+    key2, w2 = _new_worker_account(client, "bob", "pubkey2", memory_mb=2048)
+    for key, w in ((key1, w1), (key2, w2)):
+        client.post(f"/v1/workers/{w['worker_id']}/heartbeat", headers={"Authorization": f"Bearer {key}"})
+    st1 = client.get(f"/v1/workers/{w1['worker_id']}/state", headers={"Authorization": f"Bearer {key1}"}).json()
+    cluster_id = st1["cluster"]["cluster_id"]
+    body = client.get(f"/v1/clusters/{cluster_id}/info").json()
+    assert body["status"] == "assembling"
+    assert [m["layer_window"] for m in body["members"]] == [None, None]
+
+
+def test_cluster_info_missing_cluster_404(client: TestClient):
+    assert client.get("/v1/clusters/clu_nonexistent/info").status_code == 404
+

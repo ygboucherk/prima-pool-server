@@ -22,17 +22,30 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
   clusters only ever group workers with identical hashes
 - **Model discovery** — `GET /v1/models` (unauthenticated) lists the pool's models,
   their GGUF hashes, required memory, and current liveness
+- **Public info** — `GET /v1/workers/{id}/info` and `GET /v1/clusters/{id}/info`
+  (both unauthenticated) expose minimal, anonymized device/cluster data: the
+  advertised RAM pool share of a worker, and a cluster's member list (ring order)
+  with each member's layer window — the "what kind of machines ran my prompt"
+  view. Deliberately no account ids, endpoints, or availability history.
 - **WebSocket push** — `cluster_assigned` / `cluster_dissolved` frames (REST is the
   source of truth; WS is an accelerator)
 - **Inference proxy** — `POST /v1/chat/completions` (auth: user key) routes a request
   to a live cluster's head over the WireGuard tunnel (option A: the server joins the
   cluster WG network). See [Inference proxy](#inference-proxy).
+- **Usage accounting (user-side)** — every inference is logged to a `requests` table
+  (request id, API key, model, cluster, prompt/completion tokens, timestamp). Users can
+  query their own logs (by time range or latest N) and per-model statistics via
+  `GET /v1/accounts/{id}/usage/logs`, `GET /v1/accounts/{id}/usage/logs/latest`, and
+  `POST /v1/accounts/{id}/usage/stats` (auth: user key OR session token).
+  Worker-attributed views (`/worker-logs`, `/worker-logs/latest`, `/worker-stats`)
+  attribute each request to the account's workers scaled by their layer share.
+  See [Usage & accounting](#usage--accounting).
 - **Account dashboard (static GUI)** — a static web page at `/ui` that logs in with a
   session token and shows the account's workers + keys via `GET /v1/accounts/{id}/dashboard`.
 
-Out of scope for v0: usage/accounting, eviction/rebalance (churn), and
-automatic relay orchestration (a manual relay deployment is documented in the
-setup guide Part 6).
+Out of scope for v0: worker-side crediting (the other half of accounting),
+eviction/rebalance (churn), and automatic relay orchestration (a manual relay
+deployment is documented in the setup guide Part 6).
 
 ## GUI
 
@@ -100,6 +113,79 @@ curl http://<server>:8000/v1/chat/completions \
 
 Streaming (`"stream": true`, SSE) is supported. Requires `NET_ADMIN` +
 `/dev/net/tun` on the server (already in `docker-compose.yml`).
+
+## Usage & accounting
+
+Every inference request proxied through `POST /v1/chat/completions` is logged
+to a `requests` table in the SQLite store: request id, originating API key,
+model, cluster, prompt/completion tokens, and a timestamp. Token counts come
+from the upstream `usage` object (for streaming, parsed from the final SSE
+chunk). Accounting is best-effort — a logging failure never breaks inference.
+
+Clusters are **soft-deleted**: when a cluster dissolves it is marked
+`terminated` (not removed), so its history — and the `requests` that reference
+it — survive for auditing and future worker crediting.
+
+A user can query their own usage with a user-scoped API key or session token:
+
+```bash
+# Logs in [begin, end) (Unix seconds), newest first (limit caps the count)
+curl "http://<server>:8000/v1/accounts/<account_id>/usage/logs?begin=0&end=9999999999&limit=100" \
+  -H "Authorization: Bearer sk-user-..."
+
+# The account's most recent N logs, newest first (default 50)
+curl "http://<server>:8000/v1/accounts/<account_id>/usage/logs/latest?limit=10" \
+  -H "Authorization: Bearer sk-user-..."
+
+# Per-model statistics over one or more (begin, end) windows
+curl -X POST http://<server>:8000/v1/accounts/<account_id>/usage/stats \
+  -H "Authorization: Bearer sk-user-..." \
+  -H "Content-Type: application/json" \
+  -d '{"windows": [[0, 9999999999]]}'
+```
+
+The stats endpoint returns one object per window, mapping each model to its
+`{requests, prompt_tokens, completion_tokens}` totals. All three endpoints
+reject requests for another account's id (403) and worker-scoped keys (403).
+
+### Worker-attributed usage
+
+The endpoints above attribute the **full** token count of each request to the
+account that made the call. A complementary set of worker-attributed endpoints
+answers *what did this account's machines contribute to serving requests?*
+Because a cluster can contain workers from several accounts, a request is
+attributed to each worker the account owns in that cluster, scaled by that
+worker's layer share (`layer_window / total layers across the cluster`):
+
+```bash
+# Per-request-per-worker logs in [begin, end), newest first
+curl "http://<server>:8000/v1/accounts/<account_id>/worker-logs?begin=0&end=9999999999&limit=100" \
+  -H "Authorization: Bearer sk-user-..."
+
+# The account's most recent N worker-attributed logs (default 50)
+curl "http://<server>:8000/v1/accounts/<account_id>/worker-logs/latest?limit=10" \
+  -H "Authorization: Bearer sk-user-..."
+
+# Per-model worker stats over windows; optional worker_ids filter (∩ owned)
+curl -X POST http://<server>:8000/v1/accounts/<account_id>/worker-stats \
+  -H "Authorization: Bearer sk-user-..." \
+  -H "Content-Type: application/json" \
+  -d '{"windows": [[0, 9999999999]], "worker_ids": ["wrk_..."]}'
+```
+
+Each worker-log entry carries `{request_id, worker_id, model, prompt_tokens,
+completion_tokens, share, effective_prompt, effective_completion, created_at}`.
+`share`/`effective_*` are `null` when the cluster's layer distribution is
+unknown; a forwarder (`layer_window 0`) gets `share 0.0` and `effective 0.0`.
+The worker-stats endpoint returns per-window `{model: {total_tokens: [prompt,
+completion], effective_tokens: [prompt, completion]}}`. All three reject other
+accounts and worker-scoped keys (403).
+
+> **Note:** deleting a worker (`DELETE /v1/workers/{id}`) hard-deletes its row,
+> so its historical worker-attributed entries disappear from these endpoints.
+> This is accepted for now (deletion is an explicit, permanent decommission;
+> normal shutdown is transient offline). The account-level `/usage/*` endpoints
+> are unaffected.
 
 ## Configuration
 

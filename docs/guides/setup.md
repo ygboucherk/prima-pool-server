@@ -185,9 +185,42 @@ database** — a single file that survives restarts:
 - **Legacy migration**: if you previously ran the old JSON-snapshot store
   (`store.json`), it is **auto-migrated** into SQLite on first start. The JSON
   file is kept (not deleted).
+- **Schema upgrades**: when the server starts against a DB created by an older
+  version, it **auto-upgrades the schema in place** — additively (new columns)
+  and structurally (membership JSON blobs → a relational junction table). All
+  migrations are idempotent: they run once, and a DB already at the current
+  shape is left untouched on every later start. No manual step needed; existing
+  data is preserved. Notable migrations:
+  - **Layer-distribution backfill**: upgrading to the layer-distribution version
+    backfills an explicit "unknown" distribution (`{}`) onto any **live** cluster
+    that predates layer accounting — so the invariant "a live cluster always
+    carries a distribution field" holds even across upgrades. (`assembling`/
+    `terminated` clusters are untouched.)
+  - **Membership junction table**: older DBs stored cluster membership (member
+    order, readiness, assigned IPs, layer distribution) as JSON blobs on the
+    `clusters` row. The current schema stores it relationally in a
+    `cluster_members` table (one row per cluster × worker, with the member's
+    ring position, IP, ready flag, and layer window). Migration lifts the JSON
+    blobs into the table and drops the old columns — transparently, preserving
+    history (terminated clusters keep their members for accounting).
 - **Backup**: the DB is a single file — back it up by copying it, e.g.
   `docker compose exec server cp /data/store.db /data/store.db.bak` (or back up
   the Docker volume).
+
+The schema is a handful of relational tables: `accounts`, `api_keys`, `workers`,
+`clusters`, `cluster_members` (membership junction), and `requests` (usage
+accounting). Document-shaped fields that are read/written as a whole (worker
+endpoint, hardware) stay as JSON columns; membership — which is queried and
+updated per-member — is relational.
+
+Schema upgrade history (for reference; all applied automatically and
+idempotently):
+
+| Version | Change |
+| ------- | ------ |
+| v0.4 | `api_keys.worker_id` — links a worker-scoped key to the worker it registered (disambiguates per-worker cluster calls) |
+| v0.5 | `clusters.layer_windows_json` — per-worker layer distribution reported by the head; live-cluster backfill to `{}` |
+| v0.6 | Membership JSON blobs (`members_json`/`ready_json`/`ips_json`/`layer_windows_json`) → relational `cluster_members` junction table; `clusters.distribution_reported` flag |
 
 ### 2.5 Verify
 
@@ -286,14 +319,15 @@ The agent will:
 3. When enough matching workers are online, the server forms a cluster and
    pushes `cluster_assigned`.
 4. The client brings up WireGuard, launches prima.cpp in-container, and reports
-   ready.
+   ready. The head additionally parses prima.cpp's layer distribution (Halda)
+   from its stdout and reports it over WS + in its ready body.
 
 ---
 
 ## Part 4 — Use the pool
 
-Once a cluster is **live** (all members reported ready), a user with a
-`sk-user-...` key can send requests:
+Once a cluster is **live** — all members reported ready AND the head reported
+the layer distribution — a user with a `sk-user-...` key can send requests:
 
 ```bash
 curl http://<server>:8000/v1/chat/completions \
@@ -314,9 +348,11 @@ Streaming is supported (`"stream": true` → SSE).
 | Worker never assigned | Not enough matching memory, or hash mismatch | Check `GET /v1/models`; ensure `PRIMA_POOL_MODEL` + hash match; add more workers |
 | `400 ... does not match` at registration | Wrong GGUF hash | Use the exact model file the registry pins |
 | WG interface won't come up | No `/dev/net/tun` or kernel module | See Part 1 |
+| Cluster stays `assembling`, never `live` | Head hasn't reported the layer distribution (WS dropped AND REST body lost, or `PRIMA_POOL_PRIMA_READY_TIMEOUT_S` exceeded) | Check head logs for "sent layer distribution" / "readiness reported". The cluster goes live only when ALL members report ready AND the head reports a distribution — an empty one (`{}`, unknown) still counts. Ensure the head's WS is up; the REST `ready` body carries the same distribution as a fallback |
 | Peers can't reach each other | Endpoint is a container IP / NAT | Set `PRIMA_POOL_WG_ENDPOINT_HOST` to a reachable IP (or rely on the server's observed source IP). For hard NAT, deploy a relay (Part 6) |
 | `502 Upstream Error` on `/v1/chat/completions` | Server can't reach the head over WG | Ensure `PRIMA_POOL_SERVER_JOIN_WG=true` + `PRIMA_POOL_SERVER_WG_ENDPOINT_HOST` set, the server image has `wireguard-tools`, and the server joined the cluster (check server logs for `server joined cluster`) |
 | `no service selected` (client) | `COMPOSE_PROFILES` missing | Not applicable — client uses `same-container` mode |
+| `500 Internal Server Error` on heartbeats right after cluster formation | Unknown — see bug report | Grab the **tail** of the server log (`docker compose logs --tail=500`); the last lines contain the exception type + message. See [encountered bugs](../encountered_bugs/2026-08-12-heartbeat-500-after-cluster-formation.md) |
 
 ---
 
@@ -383,3 +419,13 @@ to the `./relay-peers` file (hot-reloaded every `PEER_RELOAD_S` seconds):
 - **The web GUI is account-scoped** — it shows the logged-in account's own
   workers/keys, not a global operator view.
 - **No usage/billing** yet (v1).
+- **Cluster formation is not yet a single transaction** — the scheduler selects
+  workers from the waitlist and assigns them in a multi-step write (subnet
+  allocation, cluster + membership insert, per-worker assignment). Individual
+  writes are serialized by the store lock, but the whole formation sequence is
+  not. At the current single-process scale this is benign, but two formations
+  racing could in principle pick the same cluster subnet, or a worker could be
+  selected twice. The readiness/distribution path *is* atomic (a ready report
+  or layer distribution is applied and the live gate evaluated under the store
+  lock, so a racing dissolve can never resurrect a terminated cluster). Hardening
+  formation into one transaction is planned follow-up work.

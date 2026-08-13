@@ -10,6 +10,7 @@
   <header>
     <h1>prima-pool</h1>
     <span class="subtitle">account dashboard</span>
+    <button type="button" id="logout-btn" class="logout-btn" hidden>Log out</button>
     <div class="status" id="connection-status">…</div>
   </header>
 
@@ -37,40 +38,94 @@
     </section>
 
     <section id="view" hidden>
-      <div class="cards">
-        <div class="card"><div class="value" id="stat-account">—</div><div class="label">Account</div></div>
-        <div class="card"><div class="value" id="stat-workers">—</div><div class="label">Workers</div></div>
-        <div class="card"><div class="value" id="stat-online">—</div><div class="label">Online</div></div>
-        <div class="card"><div class="value" id="stat-keys">—</div><div class="label">API keys</div></div>
-      </div>
+      <aside class="sidebar">
+        <nav>
+          <button type="button" class="tab-btn" data-tab="overview">Overview</button>
+          <button type="button" class="tab-btn" data-tab="usage">Inference usage</button>
+          <button type="button" class="tab-btn" data-tab="workers">Workers</button>
+          <button type="button" class="tab-btn" data-tab="keys">API keys</button>
+        </nav>
+      </aside>
 
-      <section>
-        <h2>Workers</h2>
-        <table>
-          <thead><tr><th>Worker</th><th>Model</th><th>Status</th><th>Online</th><th>Memory</th><th>Cluster</th></tr></thead>
-          <tbody id="workers-body"></tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>API keys</h2>
-        <form id="create-key-form" class="key-form">
-          <input type="text" id="key-name" placeholder="name (e.g. device-1)" required>
-          <select id="key-scope">
-            <option value="worker">worker</option>
-            <option value="user">user</option>
-          </select>
-          <button type="submit">Create key</button>
-        </form>
-        <div id="key-created" class="key-created" hidden>
-          <strong>Key created — copy it now, it won't be shown again:</strong>
-          <code id="key-secret"></code>
+      <div class="content">
+        <div class="cards">
+          <div class="card"><div class="value" id="stat-account">—</div><div class="label">Account</div></div>
+          <div class="card"><div class="value" id="stat-workers">—</div><div class="label">Workers</div></div>
+          <div class="card"><div class="value" id="stat-online">—</div><div class="label">Online</div></div>
+          <div class="card"><div class="value" id="stat-keys">—</div><div class="label">API keys</div></div>
         </div>
-        <table>
-          <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
-          <tbody id="keys-body"></tbody>
-        </table>
-      </section>
+
+        <section id="tab-overview">
+          <h2>Overview</h2>
+          <p class="hint">Your account's workers and API keys. Use the sidebar to drill into each section.</p>
+        </section>
+
+        <section id="tab-usage" hidden>
+          <h2>Inference usage</h2>
+          <p class="hint">Daily token consumption over the last 7 days (local timezone), and your most recent requests.</p>
+
+          <h3>Daily usage (last 7 days)</h3>
+          <div id="usage-chart" class="usage-chart" aria-label="Daily token usage bar chart"></div>
+          <p id="usage-chart-empty" class="empty" hidden>No usage in the last 7 days.</p>
+
+          <h3>Latest requests</h3>
+          <table>
+            <thead><tr><th>When</th><th>Model</th><th>Cluster</th><th>Prompt</th><th>Completion</th></tr></thead>
+            <tbody id="usage-body"><tr><td colspan="5" class="empty">No requests yet</td></tr></tbody>
+          </table>
+        </section>
+
+        <section id="tab-workers" hidden>
+          <h2>Workers</h2>
+          <p class="hint">Your workers' effective token usage over the last 7 days, and their most recent attributed inferences.</p>
+
+          <h3>Effective usage (last 7 days)</h3>
+          <div id="worker-chart" class="usage-chart" aria-label="Daily effective token usage bar chart"></div>
+          <p id="worker-chart-empty" class="empty" hidden>No worker usage in the last 7 days.</p>
+
+          <h3>Latest inference</h3>
+          <table>
+            <thead><tr><th>When</th><th>Model</th><th>Worker</th><th>Cluster</th><th>Eff. prompt</th><th>Eff. completion</th></tr></thead>
+            <tbody id="worker-logs-body"><tr><td colspan="6" class="empty">No inference yet</td></tr></tbody>
+          </table>
+
+          <h3>Workers</h3>
+          <table>
+            <thead><tr><th>Worker</th><th>Model</th><th>Status</th><th>Online</th><th>Memory</th><th>Cluster</th></tr></thead>
+            <tbody id="workers-body"></tbody>
+          </table>
+        </section>
+
+        <section id="tab-keys" hidden>
+          <h2>API keys</h2>
+          <form id="create-key-form" class="key-form">
+            <input type="text" id="key-name" placeholder="name (e.g. device-1)" required>
+            <select id="key-scope">
+              <option value="worker">worker</option>
+              <option value="user">user</option>
+            </select>
+            <button type="submit">Create key</button>
+          </form>
+          <div id="key-created" class="key-created" hidden>
+            <strong>Key created — copy it now, it won't be shown again:</strong>
+            <code id="key-secret"></code>
+          </div>
+          <table>
+            <thead><tr><th>Key</th><th>Name</th><th>Scope</th></tr></thead>
+            <tbody id="keys-body"></tbody>
+          </table>
+        </section>
+
+        <section id="tab-cluster" hidden>
+          <p class="back-link"><button type="button" id="cluster-back-btn">← Back</button></p>
+          <h2>Cluster <code id="cluster-id"></code></h2>
+          <p class="hint">Machines in this cluster (ring order — index 0 is the head).</p>
+          <table>
+            <thead><tr><th>Position</th><th>Worker</th><th>Model</th><th>Memory</th><th>Layers</th></tr></thead>
+            <tbody id="cluster-body"></tbody>
+          </table>
+        </section>
+      </div>
     </section>
   </main>
 

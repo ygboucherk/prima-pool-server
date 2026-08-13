@@ -24,6 +24,17 @@ header .subtitle { color: #8b93a7; }
   background: #2a3245;
   color: #aab4c8;
 }
+
+.logout-btn {
+  font-size: 0.85rem;
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 1px solid #273049;
+  background: none;
+  color: #aab4c8;
+  cursor: pointer;
+}
+.logout-btn:hover { border-color: #3a4459; color: #e6e9f0; }
 .status.ok { background: #1c3a2a; color: #5fd489; }
 .status.err { background: #3a1c1c; color: #ff8585; }
 
@@ -114,6 +125,30 @@ td { color: #d6dbe6; }
 .badge.registered { background: #2a3245; color: #8b93a7; }
 .badge.online { background: #1c3a2a; color: #5fd489; }
 .badge.offline { background: #3a1c1c; color: #ff8585; }
+.badge.head { background: #23305a; color: #7fa0ff; }
+.badge.unknown { background: #2a3245; color: #8b93a7; }
+
+/* Clickable cluster ids (usage logs + workers tables). */
+.cluster-link {
+  color: #7fa0ff;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+.cluster-link:hover { color: #a9c0ff; }
+
+/* Cluster drill-down view. */
+.back-link { margin-bottom: 8px; }
+.back-link button {
+  background: none;
+  border: 1px solid #273049;
+  color: #8b93a7;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.back-link button:hover { color: #e6e9f0; border-color: #3a4459; }
 
 .empty { color: #667088; font-style: italic; padding: 12px 0; }
 
@@ -157,4 +192,104 @@ td { color: #d6dbe6; }
   border-radius: 6px;
   color: #e6e9f0;
   word-break: break-all;
+}
+
+/* ── sidebar layout ─────────────────────────────────────────────────── */
+#view {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+/* Keep the `hidden` attribute working (overrides #view's display: flex). */
+#view[hidden] { display: none; }
+.sidebar {
+  flex: 0 0 180px;
+  background: #1a2130;
+  border: 1px solid #273049;
+  border-radius: 10px;
+  padding: 8px;
+}
+.sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+.tab-btn {
+  background: none;
+  border: none;
+  color: #8b93a7;
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.tab-btn:hover { color: #e6e9f0; background: #232c40; }
+.tab-btn.active { color: #fff; background: #2f6fed; font-weight: 600; }
+
+.content { flex: 1; min-width: 0; }
+.content h2 { margin-bottom: 8px; }
+.content .hint { color: #667088; font-size: 0.85rem; margin: 0 0 16px; }
+.content .hint code { color: #aab4c8; }
+
+/* Login/register forms stack full-width (outside the sidebar layout). */
+
+/* ── usage chart ────────────────────────────────────────────────────── */
+.usage-chart {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  height: 200px;
+  padding: 12px 8px 0;
+  background: #161d2b;
+  border: 1px solid #273049;
+  border-radius: 8px;
+  margin-bottom: 24px;
+}
+.usage-axis {
+  flex: 0 0 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-right: 6px;
+  border-right: 1px solid #273049;
+  font-size: 0.7rem;
+  color: #8b93a7;
+}
+.usage-axis-tick {
+  line-height: 1;
+  transform: translateY(50%);
+}
+.usage-bars {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+.usage-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 6px;
+  min-width: 0;
+}
+.usage-bar-inner {
+  width: 100%;
+  max-width: 48px;
+  background: linear-gradient(180deg, #2f6fed, #1d4bb8);
+  border-radius: 4px 4px 0 0;
+  min-height: 2px;
+}
+.usage-bar-label {
+  font-size: 0.7rem;
+  color: #8b93a7;
+  text-align: center;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  #view { flex-direction: column; }
+  .sidebar { flex: none; width: 100%; }
+  .sidebar nav { flex-direction: row; flex-wrap: wrap; }
 }

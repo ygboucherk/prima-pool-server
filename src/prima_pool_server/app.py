@@ -1,13 +1,14 @@
 """FastAPI application: REST + WebSocket control plane endpoints."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +29,8 @@ from .models import (
     ApiKey,
     ApiKeySummary,
     ClusterConfig,
+    ClusterInfo,
+    ClusterMemberInfo,
     ClusterStatus,
     ClusterStatusResponse,
     CreateKeyRequest,
@@ -36,10 +39,16 @@ from .models import (
     RegisterAccountRequest,
     RegisterWorkerRequest,
     ReportReadyRequest,
+    RequestLogEntry,
+    RequestRecord,
     Session,
+    UsageStatsRequest,
     Worker,
+    WorkerInfo,
+    WorkerLogEntry,
     WorkerRecord,
     WorkerState,
+    WorkerStatsRequest,
     WorkerStatus,
 )
 from .router import ClusterRouter
@@ -54,6 +63,79 @@ logger = logging.getLogger(__name__)
 
 def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _attribution_entry(row: dict) -> WorkerLogEntry:
+    """Build a WorkerLogEntry from a store attribution row.
+
+    share = layer_window / cluster_total (over ALL cluster members).
+    None when the distribution is unknown (no window / no total).
+    Forwarders (layer_window 0) get share 0.0 and effective 0.0.
+    """
+    lw = row["layer_window"]
+    total = row["cluster_total"]
+    if lw is not None and total:
+        share = lw / total
+        effective_prompt = row["prompt_tokens"] * share
+        effective_completion = row["completion_tokens"] * share
+    else:
+        share = None
+        effective_prompt = None
+        effective_completion = None
+    return WorkerLogEntry(
+        request_id=row["request_id"],
+        worker_id=row["worker_id"],
+        model=row["model"],
+        cluster_id=row["cluster_id"],
+        prompt_tokens=row["prompt_tokens"],
+        completion_tokens=row["completion_tokens"],
+        share=share,
+        effective_prompt=effective_prompt,
+        effective_completion=effective_completion,
+        created_at=row["created_at"],
+    )
+
+
+def _parse_sse_usage(raw: bytes) -> tuple[int, int] | None:
+    """Extract (prompt_tokens, completion_tokens) from a buffered SSE body.
+
+    llama-server emits a final `data: {...}` chunk carrying a `usage` object
+    before `data: [DONE]`. We scan every `data:` line, parse the JSON, and
+    return the last `usage` seen. Returns None if no `usage` chunk is present
+    (e.g. the upstream closed before sending usage, or the body isn't SSE) —
+    callers must not record a request in that case.
+    """
+    import json
+
+    prompt = 0
+    completion = 0
+    seen = False
+    for line in raw.split(b"\n"):
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[len(b"data:"):].strip()
+        if not payload or payload == b"[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        try:
+            # A chunk may carry only one of the two counts; keep the other
+            # from a prior chunk (or 0 if none seen yet).
+            prompt = int(usage.get("prompt_tokens", prompt))
+            completion = int(usage.get("completion_tokens", completion))
+            seen = True
+        except (TypeError, ValueError):
+            # Malformed token count — ignore this chunk rather than crash.
+            continue
+    if not seen:
+        return None
+    return prompt, completion
 
 
 def _client_ip(request: Request) -> str:
@@ -139,15 +221,31 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError()
         return account_id
 
-    def _api_key(authorization: str | None) -> tuple[str, str]:
-        """Return (account_id, scope) for a scoped API key."""
+    def _api_key(authorization: str | None) -> tuple[str, str, str]:
+        """Return (account_id, scope, key_id) for a scoped API key."""
         if not authorization or not authorization.lower().startswith("bearer "):
             raise UnauthorizedError()
         secret = authorization.split(" ", 1)[1].strip()
         rec = store.resolve_api_key(secret)
         if rec is None:
             raise UnauthorizedError("The provided API key is not valid.")
-        return rec.account_id, rec.scope
+        return rec.account_id, rec.scope, rec.key_id
+
+    def _user_credential(authorization: str | None) -> str:
+        """Resolve the account_id for a user-scoped credential.
+
+        Accepts EITHER a user-scoped API key (sk-user-...) OR the account
+        session token. Worker-scoped keys are rejected. Used by the
+        account-scoped usage/log endpoints.
+        """
+        if authorization and authorization.lower().startswith("bearer "):
+            secret = authorization.split(" ", 1)[1].strip()
+            rec = store.resolve_api_key(secret)
+            if rec is not None:
+                if rec.scope != "user":
+                    raise ForbiddenError("A worker key cannot view usage.")
+                return rec.account_id
+        return _session_account(authorization)
 
     def _worker_credential(authorization: str | None) -> tuple[str, str, str | None, str | None]:
         """Resolve (account_id, scope, key_id, bound_worker_id) from a
@@ -311,7 +409,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         body: RegisterWorkerRequest,
         authorization: str | None = Header(None),
     ):
-        account_id, scope = _api_key(authorization)
+        account_id, scope, _ = _api_key(authorization)
         if scope != "worker":
             raise ForbiddenError("A user key cannot register workers.")
 
@@ -477,6 +575,30 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         # attributed every report to the SAME worker, so the cluster never
         # went live. The key's bound worker fixes this.
         worker = _bound_worker(authorization, cluster_id)
+        # If the head carries its rank-keyed layer distribution in the body
+        # (WS fallback / primary), record it BEFORE marking readiness so the
+        # liveness gate can be satisfied atomically. Note: an EMPTY dict is a
+        # valid "unknown" report (parse failure) and must still be recorded —
+        # so we check `is not None`, not truthiness.
+        if body.layer_windows is not None and worker.ring_position == 0:
+            lw = {k: v for k, v in body.layer_windows.items() if isinstance(v, int) and v >= 0}
+            try:
+                # Map rank -> worker_id (members are in ring order).
+                by_worker: dict[str, int] = {}
+                for rank, count in lw.items():
+                    try:
+                        idx = int(rank)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= idx < len(cluster.members):
+                        by_worker[cluster.members[idx]] = count
+                # NOTE: pass by_worker through even when empty — an empty dict
+                # is the 'reported unknown' marker ({}), distinct from None
+                # ('not reported'). Collapsing {} to None would block liveness
+                # on a parse failure, which the design forbids.
+                scheduler.on_layer_distribution(cluster_id, by_worker)
+            except KeyError:
+                pass
         status = scheduler.on_ready(cluster_id, worker.worker_id)
         # on_ready mutates its own in-memory ClusterRecord; re-read so the
         # response reflects the updated ready set (the first read above is a
@@ -508,6 +630,54 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             for md in settings.models.values()
         ]
 
+    # ── public info (unauthenticated, deliberately minimal) ───────────────
+    # Both endpoints expose ONLY anonymized, class-level data (worker ids are
+    # opaque random ids; no account, endpoint, or availability info). This is
+    # the "what kind of machines ran my prompt" amazement feature. Anything
+    # instance-level (exact CPU model, OS version, live free RAM, WG IPs) must
+    # NOT be added here — see WorkerInfo / ClusterInfo docstrings.
+
+    @app.get("/v1/workers/{worker_id}/info", response_model=WorkerInfo)
+    async def worker_info(worker_id: str):
+        """Public worker info (unauthenticated).
+
+        Returns the worker's id, model, and advertised RAM pool share.
+        Deliberately minimal — see WorkerInfo.
+        """
+        w = store.get_worker(worker_id)
+        if w is None:
+            raise NotFoundError("Worker does not exist.")
+        return WorkerInfo(
+            worker_id=w.worker_id,
+            model=w.model,
+            memory_allocated_mb=w.memory_allocated_mb,
+        )
+
+    @app.get("/v1/clusters/{cluster_id}/info", response_model=ClusterInfo)
+    async def cluster_info(cluster_id: str):
+        """Public cluster info (unauthenticated).
+
+        Returns the member list (in ring order, index 0 = head) with each
+        worker's layer window — the "what kind of machines ran my prompt"
+        view. Deliberately minimal — see ClusterInfo.
+        """
+        cluster = store.get_cluster(cluster_id)
+        if cluster is None:
+            raise NotFoundError("Cluster does not exist.")
+        layer_windows = cluster.layer_windows or {}
+        return ClusterInfo(
+            cluster_id=cluster.cluster_id,
+            model=cluster.model,
+            status=cluster.status,
+            members=[
+                ClusterMemberInfo(
+                    worker_id=wid,
+                    layer_window=layer_windows.get(wid),
+                )
+                for wid in cluster.members
+            ],
+        )
+
     # ── inference proxy (option A: server joins WG, proxies to head) ─────
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request, authorization: str | None = Header(None)):
@@ -517,7 +687,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         for the requested model and forwards the request to the head's
         llama-server over the WireGuard tunnel.
         """
-        account_id, scope = _api_key(authorization)
+        account_id, scope, key_id = _api_key(authorization)
         if scope != "user":
             raise ForbiddenError("Only a user key can send inference requests.")
 
@@ -537,6 +707,25 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
         target = f"{head_url}/v1/chat/completions"
         stream = bool(body.get("stream", False))
+        request_id = new_id("req")
+
+        def _log_usage(prompt_tokens: int, completion_tokens: int) -> None:
+            """Persist a request record for accounting (best-effort)."""
+            try:
+                store.record_request(
+                    RequestRecord(
+                        request_id=request_id,
+                        account_id=account_id,
+                        key_id=key_id,
+                        model=model,
+                        cluster_id=cluster.cluster_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - accounting must never break inference
+                logger.exception("failed to record usage for request %s", request_id)
+
         try:
             if stream:
                 # Keep the httpx client alive for the WHOLE response body, and
@@ -557,20 +746,40 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                         async with client.stream(
                             "POST", target, json=body, timeout=300
                         ) as resp:
+                            # Buffer the SSE stream so we can parse the final
+                            # `usage` chunk for token accounting while still
+                            # forwarding every byte to the client.
+                            buffer = bytearray()
                             try:
                                 async for chunk in resp.aiter_bytes():
+                                    buffer.extend(chunk)
                                     yield chunk
                             except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError):
                                 # Upstream dropped the connection after sending
                                 # its final bytes. End the stream cleanly; the
                                 # client got everything llama-server produced.
                                 logger.warning("upstream stream ended prematurely: %s", target)
-                                return
+                            finally:
+                                # Only record usage if the upstream actually
+                                # sent a `usage` chunk. If it closed before
+                                # that (abrupt close), there's no token count
+                                # to log — recording (0,0) would be a false
+                                # "zero-token request" entry.
+                                parsed = _parse_sse_usage(bytes(buffer))
+                                if parsed is not None:
+                                    prompt_tokens, completion_tokens = parsed
+                                    _log_usage(prompt_tokens, completion_tokens)
 
                 return StreamingResponse(proxy_stream(), media_type="text/event-stream")
             async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
                 resp = await client.post(target, json=body)
-                return JSONResponse(status_code=resp.status_code, content=resp.json())
+                data = resp.json()
+                usage = data.get("usage") or {}
+                _log_usage(
+                    int(usage.get("prompt_tokens", 0)),
+                    int(usage.get("completion_tokens", 0)),
+                )
+                return JSONResponse(status_code=resp.status_code, content=data)
         except httpx.HTTPError as exc:
             logger.error("proxy to %s failed: %s", target, exc)
             raise ProblemError(
@@ -597,7 +806,237 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise ForbiddenError("Cannot view another account's dashboard.")
         return build_account_overview(store, account_id)
 
+    # ── usage / logs (account-scoped) ────────────────────────────────────
+    @app.get("/v1/accounts/{account_id}/usage/logs", response_model=list[RequestLogEntry])
+    async def account_usage_logs(
+        account_id: str,
+        begin: float,
+        end: float,
+        limit: int = 1000,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's inference logs in [begin, end), newest first.
+
+        Auth: user-scoped API key OR the account session token. begin/end are
+        Unix timestamps (seconds). `limit` caps the number of entries returned
+        (default 1000) so a large window doesn't silently truncate.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if begin >= end:
+            raise BadRequestError("'begin' must be before 'end'.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        return [
+            RequestLogEntry(
+                request_id=r.request_id,
+                model=r.model,
+                cluster_id=r.cluster_id,
+                prompt_tokens=r.prompt_tokens,
+                completion_tokens=r.completion_tokens,
+                created_at=r.created_at,
+            )
+            for r in store.list_requests_in_range(account_id, begin, end, limit=limit)
+        ]
+
+    @app.get("/v1/accounts/{account_id}/usage/logs/latest", response_model=list[RequestLogEntry])
+    async def account_usage_logs_latest(
+        account_id: str,
+        limit: int = 50,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's most recent `limit` inference logs, newest first.
+
+        Auth: user-scoped API key OR the account session token. `limit` is the
+        maximum number of entries to return (default 50).
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        return [
+            RequestLogEntry(
+                request_id=r.request_id,
+                model=r.model,
+                cluster_id=r.cluster_id,
+                prompt_tokens=r.prompt_tokens,
+                completion_tokens=r.completion_tokens,
+                created_at=r.created_at,
+            )
+            for r in store.list_requests_for_account(account_id, limit=limit)
+        ]
+
+    @app.post("/v1/accounts/{account_id}/usage/stats")
+    async def account_usage_stats(
+        account_id: str,
+        body: UsageStatsRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Aggregate the account's usage over a list of (begin, end) windows.
+
+        Auth: user-scoped API key OR the account session token. Returns one
+        entry per window: {model: {requests, prompt_tokens, completion_tokens}}.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        result = []
+        for begin, end in body.windows:
+            if begin >= end:
+                raise BadRequestError("Each window's 'begin' must be before its 'end'.")
+            stats = store.usage_stats_in_range(account_id, begin, end)
+            result.append(
+                {
+                    model: {
+                        "requests": reqs,
+                        "prompt_tokens": prompt,
+                        "completion_tokens": completion,
+                    }
+                    for model, (reqs, prompt, completion) in stats.items()
+                }
+            )
+        return result
+
+    # ── worker usage / logs (account-scoped, worker-attributed) ──────────
+    @app.get("/v1/accounts/{account_id}/worker-logs", response_model=list[WorkerLogEntry])
+    async def account_worker_logs(
+        account_id: str,
+        begin: float,
+        end: float,
+        limit: int = 1000,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's worker-attributed inference logs in [begin, end),
+        newest first.
+
+        Auth: user-scoped API key OR the account session token. Each request
+        served by a cluster appears once per worker the account owns in that
+        cluster, with that worker's layer share and effective tokens.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if begin >= end:
+            raise BadRequestError("'begin' must be before 'end'.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        rows = store.worker_attribution(account_id, begin, end, limit=limit)
+        return [_attribution_entry(r) for r in rows]
+
+    @app.get("/v1/accounts/{account_id}/worker-logs/latest", response_model=list[WorkerLogEntry])
+    async def account_worker_logs_latest(
+        account_id: str,
+        limit: int = 50,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's most recent `limit` worker-attributed logs,
+        newest first.
+
+        Auth: user-scoped API key OR the account session token.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        rows = store.worker_logs_latest(account_id, limit=limit)
+        return [_attribution_entry(r) for r in rows]
+
+    @app.post("/v1/accounts/{account_id}/worker-stats")
+    async def account_worker_stats(
+        account_id: str,
+        body: WorkerStatsRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Aggregate the account's worker-attributed usage over a list of
+        (begin, end) windows.
+
+        Auth: user-scoped API key OR the account session token. Returns one
+        entry per window: {model: {total_tokens: [prompt, completion],
+        effective_tokens: [prompt, completion]}}. `total_tokens` sums the
+        request token counts over the account's worker rows; `effective_tokens`
+        sums the share-scaled counts. If `worker_ids` is given, only rows for
+        (worker_ids ∩ owned workers) are included.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's usage.")
+        result = []
+        for begin, end in body.windows:
+            if begin >= end:
+                raise BadRequestError("Each window's 'begin' must be before its 'end'.")
+            rows = store.worker_attribution(account_id, begin, end, worker_ids=body.worker_ids)
+            per_model: dict[str, dict] = {}
+            for r in rows:
+                entry = per_model.setdefault(
+                    r["model"],
+                    {"total_tokens": [0.0, 0.0], "effective_tokens": [0.0, 0.0]},
+                )
+                entry["total_tokens"][0] += r["prompt_tokens"]
+                entry["total_tokens"][1] += r["completion_tokens"]
+                lw = r["layer_window"]
+                total = r["cluster_total"]
+                if lw is not None and total:
+                    share = lw / total
+                    entry["effective_tokens"][0] += r["prompt_tokens"] * share
+                    entry["effective_tokens"][1] += r["completion_tokens"] * share
+            result.append(per_model)
+        return result
+
     # ── WebSocket ────────────────────────────────────────────────────────
+    async def _handle_ws_frame(frame: dict, worker_id: str) -> None:
+        """Handle a client-originated WS frame.
+
+        Only `layer_distribution` is currently supported: the head reports the
+        per-worker layer windows (Halda) once its prima.cpp is ready. It is
+        accepted ONLY from the head (ring_position 0) — workers cannot report
+        a distribution.
+
+        The client sends the distribution keyed by RANK (Device Index, which
+        is the ring position). The server maps rank -> worker_id using the
+        cluster's member order (members[rank] == worker_id), so it can store
+        the distribution keyed by worker_id for accounting.
+        """
+        ftype = frame.get("type")
+        if ftype != "layer_distribution":
+            return
+        w = store.get_worker(worker_id)
+        if w is None or w.cluster_id is None:
+            return
+        if w.ring_position != 0:
+            logger.warning("ignoring layer_distribution from non-head worker %s", worker_id)
+            return
+        cluster_id = frame.get("cluster_id")
+        if cluster_id != w.cluster_id:
+            return
+        lw = frame.get("layer_windows")
+        if lw is not None and not isinstance(lw, dict):
+            logger.warning("malformed layer_windows from %s; recording unknown", worker_id)
+            lw = None
+        elif lw is not None:
+            # Normalize: only ints, drop anything else.
+            lw = {k: v for k, v in lw.items() if isinstance(k, str) and isinstance(v, int) and v >= 0}
+        try:
+            cluster = store.get_cluster(cluster_id)
+            if cluster is None:
+                return
+            # Map rank -> worker_id (members are in ring order; rank == index).
+            by_worker: dict[str, int] = {}
+            for rank, count in (lw or {}).items():
+                try:
+                    idx = int(rank)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < len(cluster.members):
+                    by_worker[cluster.members[idx]] = count
+            # Pass by_worker through even when empty — {} is the 'reported
+            # unknown' marker, distinct from None ('not reported').
+            status = scheduler.on_layer_distribution(cluster_id, by_worker)
+            logger.info(
+                "recorded layer distribution for cluster %s from head %s (%s)",
+                cluster_id, worker_id, by_worker,
+            )
+            if status == ClusterStatus.live:
+                logger.info("cluster %s is now live", cluster_id)
+        except KeyError:
+            logger.warning("layer_distribution for unknown cluster %s from %s", cluster_id, worker_id)
+
     @app.websocket("/v1/workers/{worker_id}/events")
     async def worker_events(websocket: WebSocket, worker_id: str, api_key: str | None = None):
         # Auth via query param (per spec) or Authorization header.
@@ -635,6 +1074,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 msg = await websocket.receive_text()
                 if msg == "ping":
                     await websocket.send_json({"type": "pong"})
+                else:
+                    try:
+                        frame = json.loads(msg)
+                    except ValueError:
+                        continue
+                    await _handle_ws_frame(frame, worker_id)
         except WebSocketDisconnect:
             pass
         finally:
