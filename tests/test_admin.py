@@ -107,6 +107,36 @@ def test_first_account_bootstrap_skips_when_admin_exists():
     assert r.status_code == 200
 
 
+def test_load_dotenv_reads_env_file(tmp_path, monkeypatch):
+    """The CLI loads a `.env` file from the CWD, so a direct (non-compose) run
+    picks up PRIMA_POOL_FIRST_ACCOUNT and friends."""
+    from prima_pool_server.cli import _load_dotenv
+
+    (tmp_path / ".env").write_text("PRIMA_POOL_FIRST_ACCOUNT=admin:admin\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRIMA_POOL_FIRST_ACCOUNT", raising=False)
+
+    _load_dotenv()
+
+    import os
+
+    assert os.environ.get("PRIMA_POOL_FIRST_ACCOUNT") == "admin:admin"
+
+
+def test_load_dotenv_no_file_is_noop(tmp_path, monkeypatch):
+    """Without a `.env` file, _load_dotenv is a no-op (no crash)."""
+    from prima_pool_server.cli import _load_dotenv
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRIMA_POOL_FIRST_ACCOUNT", raising=False)
+
+    _load_dotenv()
+
+    import os
+
+    assert os.environ.get("PRIMA_POOL_FIRST_ACCOUNT") is None
+
+
 def test_register_gated_when_work_revoked_and_not_permissionless():
     """With work_permissionless=false, an account whose can_work is revoked
     cannot register workers; one with can_work (granted by admin) can."""
