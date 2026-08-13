@@ -917,7 +917,7 @@ components:
 
     AdminAccount:
       type: object
-      required: [account_id, username, is_admin, can_work, can_use, banned, created_at]
+      required: [account_id, username, is_admin, can_work, can_use, banned, effective_can_work, effective_can_use, created_at]
       properties:
         account_id: { type: string }
         username: { type: string }
@@ -925,6 +925,12 @@ components:
         can_work: { type: boolean }
         can_use: { type: boolean }
         banned: { type: boolean }
+        effective_can_work:
+          type: boolean
+          description: "(not banned) and (can_work or work_permissionless)"
+        effective_can_use:
+          type: boolean
+          description: "(not banned) and (can_use or use_permissionless)"
         created_at:
           type: string
           format: date-time

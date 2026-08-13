@@ -217,6 +217,17 @@ td { color: #d6dbe6; }
 }
 .admin-toggle:hover { border-color: #3a4459; color: #e6e9f0; }
 
+/* Grey out a column that has no effect (its permissionless switch is on). */
+th.muted, td.muted { color: #4a5264; }
+td.muted .badge { opacity: 0.45; }
+button.admin-toggle.muted {
+  color: #4a5264;
+  border-color: #1e2534;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+button.admin-toggle.muted:hover { color: #4a5264; border-color: #1e2534; }
+
 /* ── sidebar layout ─────────────────────────────────────────────────── */
 #view {
   display: flex;

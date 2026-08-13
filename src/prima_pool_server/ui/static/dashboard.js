@@ -527,11 +527,18 @@
       : '<span class="badge offline">no</span>';
   }
 
-  function renderAdminAccounts(accounts) {
+  function renderAdminAccounts(accounts, perm) {
     const tbody = $('admin-accounts-body');
     tbody.innerHTML = '';
+    // A permission column has no effect while its *_PERMISSIONLESS switch is
+    // on (every non-banned account effectively has the capability), so grey it
+    // out to signal the toggle is inert.
+    const workMuted = perm ? perm.work_permissionless : false;
+    const useMuted = perm ? perm.use_permissionless : false;
+    $('th-can-work').className = workMuted ? 'muted' : '';
+    $('th-can-use').className = useMuted ? 'muted' : '';
     if (!accounts.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No accounts</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No accounts</td></tr>';
       return;
     }
     for (const a of accounts) {
@@ -539,13 +546,15 @@
       tr.innerHTML = `
         <td>${escapeHtml(a.username)}</td>
         <td>${badge(a.is_admin)}</td>
-        <td>${badge(a.can_work)}</td>
-        <td>${badge(a.can_use)}</td>
+        <td class="${workMuted ? 'muted' : ''}">${badge(a.can_work)}</td>
+        <td class="${useMuted ? 'muted' : ''}">${badge(a.can_use)}</td>
         <td>${badge(a.banned)}</td>
+        <td class="${a.banned ? 'muted' : ''}">${badge(a.effective_can_work)}</td>
+        <td class="${a.banned ? 'muted' : ''}">${badge(a.effective_can_use)}</td>
         <td>
           <button type="button" class="admin-toggle" data-field="is_admin" data-account="${a.account_id}" data-val="${a.is_admin}">${a.is_admin ? 'demote' : 'promote'}</button>
-          <button type="button" class="admin-toggle" data-field="can_work" data-account="${a.account_id}" data-val="${a.can_work}">${a.can_work ? 'revoke work' : 'allow work'}</button>
-          <button type="button" class="admin-toggle" data-field="can_use" data-account="${a.account_id}" data-val="${a.can_use}">${a.can_use ? 'revoke use' : 'allow use'}</button>
+          <button type="button" class="admin-toggle${workMuted ? ' muted' : ''}" data-field="can_work" data-account="${a.account_id}" data-val="${a.can_work}">${a.can_work ? 'revoke work' : 'allow work'}</button>
+          <button type="button" class="admin-toggle${useMuted ? ' muted' : ''}" data-field="can_use" data-account="${a.account_id}" data-val="${a.can_use}">${a.can_use ? 'revoke use' : 'allow use'}</button>
           <button type="button" class="admin-toggle" data-field="banned" data-account="${a.account_id}" data-val="${a.banned}">${a.banned ? 'unban' : 'ban'}</button>
         </td>`;
       tr.querySelectorAll('.admin-toggle').forEach((btn) => {
@@ -568,7 +577,7 @@
       ]);
       $('admin-work-perm').textContent = perm.work_permissionless ? 'true' : 'false';
       $('admin-use-perm').textContent = perm.use_permissionless ? 'true' : 'false';
-      renderAdminAccounts(accounts);
+      renderAdminAccounts(accounts, perm);
     } catch (e) {
       handleApiError(e);
     }

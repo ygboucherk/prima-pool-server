@@ -312,6 +312,52 @@ def test_admin_list_accounts_includes_flags():
         assert accounts["bob"]["can_work"] is False
         assert accounts["bob"]["can_use"] is True
         assert accounts["bob"]["banned"] is False
+        # Effective capabilities: permissionless defaults are on, so both are
+        # effective regardless of the raw flags (but banned always kills them).
+        assert accounts["bob"]["effective_can_work"] is True
+        assert accounts["bob"]["effective_can_use"] is True
+
+
+def test_effective_capabilities_reflect_gating_and_ban():
+    """effective_can_* = (not banned) and (flag or permissionless)."""
+    client = _make_client(
+        _settings(work_permissionless=False, use_permissionless=False)
+    )
+    with client:
+        admin_id, tok = _register_and_promote(client, "alice")
+        _register(client, username="bob")
+        bob_sess = _login(client, username="bob")
+        bob_id = bob_sess["session_token"].split(".")[0].replace("sess_", "")
+
+        def view():
+            accs = {a["username"]: a for a in client.get(
+                "/v1/admin/accounts", headers={"Authorization": f"Bearer {tok}"}
+            ).json()}
+            return accs["bob"]
+
+        # New account: can_work=False, can_use=True; neither permissionless.
+        bob = view()
+        assert bob["effective_can_work"] is False
+        assert bob["effective_can_use"] is True
+
+        # Grant can_work → effective work flips true.
+        client.patch(
+            f"/v1/admin/accounts/{bob_id}",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"can_work": True},
+        )
+        assert view()["effective_can_work"] is True
+
+        # Ban → both effective capabilities collapse to false.
+        client.patch(
+            f"/v1/admin/accounts/{bob_id}",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"banned": True},
+        )
+        bob = view()
+        assert bob["banned"] is True
+        assert bob["effective_can_work"] is False
+        assert bob["effective_can_use"] is False
 
 
 def test_permission_state_reflects_settings():

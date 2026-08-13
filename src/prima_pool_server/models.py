@@ -121,7 +121,14 @@ class Account(BaseModel):
 
 
 class AdminAccount(BaseModel):
-    """Admin view of an account: identity + the four permission booleans."""
+    """Admin view of an account: identity + the four permission booleans + the
+    EFFECTIVE capabilities.
+
+    `can_work`/`can_use` are the raw per-account flags. `effective_can_work`/
+    `effective_can_use` are what the account can ACTUALLY do, computed as
+    `(not banned) and (flag or *_PERMISSIONLESS)` — the same formula the
+    enforcement layer uses, so the admin UI never disagrees with reality.
+    """
 
     account_id: str
     username: str
@@ -129,6 +136,8 @@ class AdminAccount(BaseModel):
     can_work: bool
     can_use: bool
     banned: bool
+    effective_can_work: bool
+    effective_can_use: bool
     created_at: str
 
 

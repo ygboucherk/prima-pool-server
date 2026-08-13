@@ -502,6 +502,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return JSONResponse(status_code=204, content=None)
 
     # ── admin (account management, admin-gated) ──────────────────────────
+    def _admin_account_view(a: AccountRecord) -> AdminAccount:
+        """Build the admin view of an account, computing the EFFECTIVE
+        capabilities with the same formula as the enforcement layer."""
+        return AdminAccount(
+            account_id=a.account_id,
+            username=a.username,
+            is_admin=a.is_admin,
+            can_work=a.can_work,
+            can_use=a.can_use,
+            banned=a.banned,
+            effective_can_work=_can_work(a.account_id),
+            effective_can_use=_can_use(a.account_id),
+            created_at=_iso(a.created_at),
+        )
+
     @app.get("/v1/admin/permissions", response_model=PermissionState)
     async def admin_permission_state(authorization: str | None = Header(None)):
         """Current pool-wide permissionless switches (admin only)."""
@@ -515,18 +530,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     async def admin_list_accounts(authorization: str | None = Header(None)):
         """List all accounts with their permission booleans (admin only)."""
         _require_admin(authorization)
-        return [
-            AdminAccount(
-                account_id=a.account_id,
-                username=a.username,
-                is_admin=a.is_admin,
-                can_work=a.can_work,
-                can_use=a.can_use,
-                banned=a.banned,
-                created_at=_iso(a.created_at),
-            )
-            for a in store.list_accounts()
-        ]
+        return [_admin_account_view(a) for a in store.list_accounts()]
 
     @app.patch("/v1/admin/accounts/{account_id}", response_model=AdminAccount)
     async def admin_update_account(
@@ -565,15 +569,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             banned=body.banned,
         )
         updated = store.get_account(account_id)
-        return AdminAccount(
-            account_id=updated.account_id,
-            username=updated.username,
-            is_admin=updated.is_admin,
-            can_work=updated.can_work,
-            can_use=updated.can_use,
-            banned=updated.banned,
-            created_at=_iso(updated.created_at),
-        )
+        return _admin_account_view(updated)
 
     # ── workers ──────────────────────────────────────────────────────────
     @app.post("/v1/workers/register", response_model=Worker, status_code=201)
