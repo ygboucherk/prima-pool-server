@@ -62,7 +62,15 @@
       err.status = resp.status;
       throw err;
     }
-    return resp.json();
+    // 204 No Content (and other empty bodies) have no JSON to parse.
+    if (resp.status === 204 || resp.status === 205) return null;
+    const text = await resp.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return null;
+    }
   }
 
   // The dashboard data is fetched once and shared by all tabs.
