@@ -46,6 +46,14 @@ capped at 2⁶³⁻¹ minor units ≈ **9.2 tokens**. Requests outside that rang
 rejected with 422 (the request models bound the field to `[-(2⁶³), 2⁶³⁻¹]` to
 avoid an `OverflowError`/500).
 
+Two computed values can overflow **even when the inputs are in range**, and the
+store re-checks both against the same bounds (raising `ValueError`, surfaced as
+400 by the endpoints) rather than letting SQLite raise `OverflowError`:
+
+- **`adjust_balance`**: `balance + delta` (e.g. INT64_MAX + 1).
+- **`set_balance`'s recorded delta**: `balance - before` (e.g. INT64_MIN →
+  INT64_MAX has delta 2⁶⁴−1, which overflows the `delta` column).
+
 This is fine for a v0 ledger and far above any real per-request debit, but it
 is a real limit. The escape hatches, when real billing lands:
 

@@ -625,19 +625,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return _admin_account_view(updated)
 
     # ── admin (balance management, admin-gated) ─────────────────────────
-    def _balance_event_view(rec, admin_username: str | None = None) -> AdminBalanceEvent | BalanceEvent:
-        """Build a balance-event response; admin view adds the actor's identity."""
-        base = dict(
+    def _balance_event_view(rec, admin_username: str | None = None) -> AdminBalanceEvent:
+        """Build an admin balance-event response (adds the actor's identity).
+
+        `admin_username` is None when the event has no recorded admin.
+        """
+        return AdminBalanceEvent(
             event_id=rec.event_id,
             kind=rec.kind,
             delta=rec.delta,
             balance_after=rec.balance_after,
             reason=rec.reason,
             created_at=_iso(rec.created_at),
+            admin_username=admin_username,
         )
-        if admin_username is not None:
-            return AdminBalanceEvent(**base, admin_username=admin_username)
-        return BalanceEvent(**base)
 
     @app.put("/v1/admin/accounts/{account_id}/balance", response_model=AccountBalance)
     async def admin_set_balance(
@@ -649,12 +650,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         admin = _require_admin(authorization)
         if store.get_account(account_id) is None:
             raise NotFoundError("Account does not exist.")
-        store.set_balance(
-            account_id,
-            body.balance,
-            admin_account_id=admin.account_id,
-            reason=body.reason,
-        )
+        try:
+            store.set_balance(
+                account_id,
+                body.balance,
+                admin_account_id=admin.account_id,
+                reason=body.reason,
+            )
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
         return AccountBalance(account_id=account_id, balance=body.balance)
 
     @app.post(
@@ -674,12 +678,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         admin = _require_admin(authorization)
         if store.get_account(account_id) is None:
             raise NotFoundError("Account does not exist.")
-        new_balance = store.adjust_balance(
-            account_id,
-            body.delta,
-            admin_account_id=admin.account_id,
-            reason=body.reason,
-        )
+        try:
+            new_balance = store.adjust_balance(
+                account_id,
+                body.delta,
+                admin_account_id=admin.account_id,
+                reason=body.reason,
+            )
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
         return AccountBalance(account_id=account_id, balance=new_balance)
 
     @app.get(

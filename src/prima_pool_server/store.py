@@ -36,6 +36,8 @@ import time
 
 from . import security
 from .models import (
+    BALANCE_MAX,
+    BALANCE_MIN,
     AccountRecord,
     ApiKeyRecord,
     BalanceEventRecord,
@@ -884,8 +886,12 @@ class Store:
 
         The mutation (UPDATE + event insert) is atomic under the store lock and
         a single transaction — no drift between state and audit trail. Returns
-        False if the account does not exist.
+        False if the account does not exist. Raises ValueError if `balance` is
+        outside the SQLite 64-bit range, or if the recorded delta (balance -
+        before) would itself overflow the 64-bit `delta` column.
         """
+        if balance < BALANCE_MIN or balance > BALANCE_MAX:
+            raise ValueError("balance out of 64-bit range")
         with self._lock:
             with self._conn:
                 row = self._conn.execute(
@@ -895,6 +901,11 @@ class Store:
                 if row is None:
                     return False
                 before = int(row["balance_minor"])
+                delta = balance - before
+                if delta < BALANCE_MIN or delta > BALANCE_MAX:
+                    raise ValueError(
+                        "balance change does not fit in the 64-bit delta column"
+                    )
                 cur = self._conn.execute(
                     "UPDATE accounts SET balance_minor = ? WHERE account_id = ?",
                     (balance, account_id),
@@ -906,7 +917,7 @@ class Store:
                     account_id=account_id,
                     admin_account_id=admin_account_id,
                     kind="set",
-                    delta=balance - before,
+                    delta=delta,
                     before=before,
                     after=balance,
                     reason=reason,
@@ -923,8 +934,9 @@ class Store:
     ) -> int | None:
         """Adjust an account's balance by a signed delta (no sign restriction).
 
-        Returns the new balance, or None if the account does not exist. The
-        read-modify-write is atomic under the store lock.
+        Returns the new balance, or None if the account does not exist. Raises
+        ValueError if the resulting balance would overflow the 64-bit range
+        (e.g. balance at INT64_MAX plus a positive delta).
         """
         with self._lock:
             with self._conn:
@@ -936,6 +948,8 @@ class Store:
                     return None
                 before = int(row["balance_minor"])
                 after = before + delta
+                if after < BALANCE_MIN or after > BALANCE_MAX:
+                    raise ValueError("balance adjustment overflows the 64-bit range")
                 self._conn.execute(
                     "UPDATE accounts SET balance_minor = ? WHERE account_id = ?",
                     (after, account_id),

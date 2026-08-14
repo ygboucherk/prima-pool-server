@@ -14,12 +14,14 @@ from pydantic import BaseModel, Field, field_serializer
 
 # Balance is stored in a SQLite INTEGER (64-bit signed). Values outside this
 # range raise OverflowError on insert, so request fields are bounded here to
-# yield a clean 422 instead. NOTE: 2^63-1 minor units == ~9.2 tokens (unit is
-# 10^-18 token), so the INTEGER ceiling is a real limit for large balances —
-# see the billing-balances design note (re-denomination / TEXT storage is the
-# escape hatch when real billing lands).
-_BALANCE_MIN = -(2**63)
-_BALANCE_MAX = 2**63 - 1
+# yield a clean 422 instead, and the store re-checks results against the same
+# bounds so a computed overflow (e.g. balance + delta) can't 500 either.
+# NOTE: 2^63-1 minor units == ~9.2 tokens (unit is 10^-18 token), so the
+# INTEGER ceiling is a real limit for large balances — see the billing-balances
+# design note (re-denomination / TEXT storage is the escape hatch when real
+# billing lands).
+BALANCE_MIN = -(2**63)
+BALANCE_MAX = 2**63 - 1
 
 
 # ── Enums ────────────────────────────────────────────────────────────────
@@ -87,7 +89,7 @@ class SetBalanceRequest(BaseModel):
     a >2^53 value as a string to avoid float64 loss.
     """
 
-    balance: int = Field(ge=_BALANCE_MIN, le=_BALANCE_MAX)
+    balance: int = Field(ge=BALANCE_MIN, le=BALANCE_MAX)
     reason: str | None = None
 
 
@@ -98,7 +100,7 @@ class AdjustBalanceRequest(BaseModel):
     going negative.
     """
 
-    delta: int = Field(ge=_BALANCE_MIN, le=_BALANCE_MAX)
+    delta: int = Field(ge=BALANCE_MIN, le=BALANCE_MAX)
     reason: str | None = None
 
 
@@ -209,9 +211,14 @@ class BalanceEvent(BaseModel):
 
 
 class AdminBalanceEvent(BalanceEvent):
-    """Admin view of a balance event: adds the acting admin's identity."""
+    """Admin view of a balance event: adds the acting admin's identity.
 
-    admin_username: str
+    `admin_username` is None when the mutation had no recorded admin (e.g. a
+    store-level operation without an actor, or the acting admin account has
+    since been deleted).
+    """
+
+    admin_username: str | None = None
 
 
 class AccountBalance(BaseModel):

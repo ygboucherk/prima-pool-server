@@ -226,6 +226,82 @@ def test_balance_over_int64_is_rejected():
         assert r.status_code == 422, r.text
 
 
+def test_adjust_overflow_returns_400_not_500():
+    """balance + delta can overflow 64-bit even when both inputs are in range;
+    the store must reject it cleanly (400) rather than raise OverflowError."""
+    client = _make_client(_settings())
+    with client:
+        admin_id, tok = _promote(client, "alice")
+        _register(client, username="bob")
+        bob_sess = _login(client, username="bob")
+        bob_id = bob_sess["session_token"].split(".")[0].replace("sess_", "")
+        maxv = str(2**63 - 1)
+        # Set to INT64_MAX, then adjust +1 → overflow.
+        client.put(
+            f"/v1/admin/accounts/{bob_id}/balance",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"balance": maxv},
+        )
+        r = client.post(
+            f"/v1/admin/accounts/{bob_id}/balance/adjust",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"delta": 1},
+        )
+        assert r.status_code == 400, r.text
+        # Balance unchanged.
+        assert client.get(
+            f"/v1/accounts/{bob_id}/balance",
+            headers={"Authorization": f"Bearer {bob_sess['session_token']}"},
+        ).json()["balance"] == maxv
+
+
+def test_set_delta_overflow_returns_400_not_500():
+    """A set whose recorded delta (after - before) exceeds 64-bit (e.g.
+    INT64_MIN → INT64_MAX) must be rejected cleanly, not 500 on the event."""
+    client = _make_client(_settings())
+    with client:
+        admin_id, tok = _promote(client, "alice")
+        _register(client, username="bob")
+        bob_sess = _login(client, username="bob")
+        bob_id = bob_sess["session_token"].split(".")[0].replace("sess_", "")
+        minv = str(-(2**63))
+        maxv = str(2**63 - 1)
+        client.put(
+            f"/v1/admin/accounts/{bob_id}/balance",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"balance": minv},
+        )
+        r = client.put(
+            f"/v1/admin/accounts/{bob_id}/balance",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"balance": maxv},
+        )
+        assert r.status_code == 400, r.text
+        # Balance unchanged (still INT64_MIN).
+        assert client.get(
+            f"/v1/accounts/{bob_id}/balance",
+            headers={"Authorization": f"Bearer {bob_sess['session_token']}"},
+        ).json()["balance"] == minv
+
+
+def test_admin_events_handles_null_admin():
+    """An event with no recorded admin (admin_account_id is None) must not 500
+    the admin events endpoint — admin_username is None in the response."""
+    client = _make_client(_settings())
+    with client:
+        admin_id, tok = _promote(client, "alice")
+        _register(client, username="bob")
+        bob_id = _login(client, username="bob")["session_token"].split(".")[0].replace("sess_", "")
+        # Direct store write with no admin (simulates a store-level op).
+        client.app.state.store.set_balance(bob_id, 7)
+        r = client.get(
+            f"/v1/admin/accounts/{bob_id}/balance/events",
+            headers={"Authorization": f"Bearer {tok}"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["admin_username"] is None
+
+
 def test_account_can_view_own_balance_and_events():
     client = _make_client(_settings())
     with client:
