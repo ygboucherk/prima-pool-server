@@ -133,6 +133,70 @@ def test_create_and_list_keys(client: TestClient):
     assert "api_key" not in keys.json()[0]
 
 
+def test_change_password_success(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    r = client.post(
+        f"/v1/accounts/{acc['account_id']}/password",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"current_password": "hunter2hunter2", "new_password": "newpass1234"},
+    )
+    assert r.status_code == 204, r.text
+    # Old password no longer works, new one does.
+    assert client.post("/v1/accounts/login", json={"username": "alice", "password": "hunter2hunter2"}).status_code == 401
+    assert client.post("/v1/accounts/login", json={"username": "alice", "password": "newpass1234"}).status_code == 200
+
+
+def test_change_password_wrong_current(client: TestClient):
+    acc = _register_account(client)
+    sess = _login(client)
+    r = client.post(
+        f"/v1/accounts/{acc['account_id']}/password",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"current_password": "wrongpass", "new_password": "newpass1234"},
+    )
+    assert r.status_code == 401, r.text
+    # Password unchanged.
+    assert client.post("/v1/accounts/login", json={"username": "alice", "password": "hunter2hunter2"}).status_code == 200
+
+
+def test_change_password_requires_auth(client: TestClient):
+    acc = _register_account(client)
+    r = client.post(
+        f"/v1/accounts/{acc['account_id']}/password",
+        json={"current_password": "hunter2hunter2", "new_password": "newpass1234"},
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_change_password_cannot_change_other_account(client: TestClient):
+    acc = _register_account(client)
+    other = _register_account(client, username="bob")
+    sess = _login(client, username="bob")
+    r = client.post(
+        f"/v1/accounts/{acc['account_id']}/password",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"current_password": "hunter2hunter2", "new_password": "newpass1234"},
+    )
+    assert r.status_code == 403, r.text
+
+
+def test_change_password_keeps_api_keys(client: TestClient):
+    """Changing the password must NOT revoke existing API keys."""
+    acc = _register_account(client)
+    sess = _login(client)
+    key = _create_worker_key(client, acc["account_id"], sess["session_token"])
+    r = client.post(
+        f"/v1/accounts/{acc['account_id']}/password",
+        headers={"Authorization": f"Bearer {sess['session_token']}"},
+        json={"current_password": "hunter2hunter2", "new_password": "newpass1234"},
+    )
+    assert r.status_code == 204, r.text
+    # The worker key still works after the password change.
+    wr = _register_worker(client, key)
+    assert wr.status_code == 201, wr.text
+
+
 def test_worker_register_and_waitlist(client: TestClient):
     acc = _register_account(client)
     sess = _login(client)

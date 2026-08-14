@@ -26,6 +26,8 @@ from .errors import (
 from .liveness import LivenessMonitor
 from .models import (
     Account,
+    AccountRecord,
+    AdminAccount,
     ApiKey,
     ApiKeySummary,
     ClusterConfig,
@@ -33,15 +35,18 @@ from .models import (
     ClusterMemberInfo,
     ClusterStatus,
     ClusterStatusResponse,
+    ChangePasswordRequest,
     CreateKeyRequest,
     LoginRequest,
     ModelInfo,
+    PermissionState,
     RegisterAccountRequest,
     RegisterWorkerRequest,
     ReportReadyRequest,
     RequestLogEntry,
     RequestRecord,
     Session,
+    UpdateAccountPermissionsRequest,
     UsageStatsRequest,
     Worker,
     WorkerInfo,
@@ -53,7 +58,7 @@ from .models import (
 )
 from .router import ClusterRouter
 from .scheduler import Scheduler
-from .security import new_id, sign_session, verify_password, verify_session
+from .security import hash_password, new_id, sign_session, verify_password, verify_session
 from .store import Store
 from .wg_server import ServerWireGuard
 from .ws_hub import WsHub
@@ -183,6 +188,44 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     settings = settings or Settings()
     store = store or Store(settings_path_from_env())
 
+    def _bootstrap_first_account() -> None:
+        """Create the first admin account from PRIMA_POOL_FIRST_ACCOUNT.
+
+        Format: "username:password" (username has no colon). The account is
+        created as admin IFF no admin account exists yet — so a fresh deploy
+        gains an operator, an existing pool with an admin is left untouched,
+        and a deleted/demoted admin is never silently re-promoted. Idempotent.
+        """
+        raw = settings.first_account.strip()
+        if not raw:
+            return
+        if ":" not in raw:
+            logger.warning(
+                "PRIMA_POOL_FIRST_ACCOUNT must be 'username:password'; ignoring invalid value"
+            )
+            return
+        username, password = raw.split(":", 1)
+        username = username.strip()
+        if not username or not password:
+            logger.warning("PRIMA_POOL_FIRST_ACCOUNT has an empty username or password; ignoring")
+            return
+        if store.count_admins() > 0:
+            return
+        if store.get_account_by_username(username) is not None:
+            # An account with this name already exists (non-admin) — don't
+            # clobber or promote it; leave bootstrap to the operator.
+            logger.info(
+                "first-account bootstrap skipped: username %r already exists and no admin exists",
+                username,
+            )
+            return
+        rec = store.create_account(username, password)
+        if rec is not None:
+            store.update_account_permissions(rec.account_id, is_admin=True)
+            logger.info("created first admin account %r from PRIMA_POOL_FIRST_ACCOUNT", username)
+        else:
+            logger.warning("failed to create first admin account %r (username taken)", username)
+
     hub = WsHub(store, settings)
     wg_server = ServerWireGuard(settings)
     scheduler = Scheduler(store, settings, hub, wg_server)
@@ -191,6 +234,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        _bootstrap_first_account()
         monitor.start()
         yield
         await monitor.stop()
@@ -217,8 +261,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError("Session token is invalid or expired.")
         # The session token embeds the account_id as the token body.
         account_id = verified[0]
-        if store.get_account(account_id) is None:
+        rec = store.get_account(account_id)
+        if rec is None:
             raise UnauthorizedError()
+        if rec.banned:
+            raise ForbiddenError("This account is banned.")
         return account_id
 
     def _api_key(authorization: str | None) -> tuple[str, str, str]:
@@ -229,7 +276,38 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         rec = store.resolve_api_key(secret)
         if rec is None:
             raise UnauthorizedError("The provided API key is not valid.")
+        acct = store.get_account(rec.account_id)
+        if acct is not None and acct.banned:
+            raise ForbiddenError("This account is banned.")
         return rec.account_id, rec.scope, rec.key_id
+
+    def _can_work(account_id: str) -> bool:
+        """Effective can_work = (not banned) and (can_work or permissionless)."""
+        rec = store.get_account(account_id)
+        if rec is None or rec.banned:
+            return False
+        return rec.can_work or settings.work_permissionless
+
+    def _can_use(account_id: str) -> bool:
+        """Effective can_use = (not banned) and (can_use or permissionless)."""
+        rec = store.get_account(account_id)
+        if rec is None or rec.banned:
+            return False
+        return rec.can_use or settings.use_permissionless
+
+    def _require_admin(authorization: str | None) -> AccountRecord:
+        """Resolve the caller as an admin (session token only)."""
+        account_id = _session_account(authorization)
+        rec = store.get_account(account_id)
+        if rec is None or not rec.is_admin:
+            raise ForbiddenError("Admin privileges required.")
+        return rec
+
+    def _assert_not_banned(account_id: str) -> None:
+        """Reject a banned account (hard gate, overrides everything)."""
+        rec = store.get_account(account_id)
+        if rec is not None and rec.banned:
+            raise ForbiddenError("This account is banned.")
 
     def _user_credential(authorization: str | None) -> str:
         """Resolve the account_id for a user-scoped credential.
@@ -244,6 +322,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             if rec is not None:
                 if rec.scope != "user":
                     raise ForbiddenError("A worker key cannot view usage.")
+                _assert_not_banned(rec.account_id)
                 return rec.account_id
         return _session_account(authorization)
 
@@ -283,6 +362,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise UnauthorizedError("The provided credentials are not valid.")
         if scope != "worker" and scope != "session":
             raise ForbiddenError("A user key cannot manage workers.")
+        _assert_not_banned(account_id)
         return account_id, scope, key_id, bound_worker_id
 
     def _worker_from_key(authorization: str | None, worker_id: str) -> WorkerRecord:
@@ -363,9 +443,28 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         rec = store.get_account_by_username(body.username)
         if rec is None or not verify_password(body.password, rec.password_hash):
             raise UnauthorizedError("Invalid credentials.")
+        if rec.banned:
+            raise ForbiddenError("This account is banned.")
         expires_at = int(time.time()) + settings.session_ttl_s
         token = sign_session(rec.account_id, settings.session_secret, expires_at)
         return Session(session_token=token, expires_at=_iso(expires_at))
+
+    @app.post("/v1/accounts/{account_id}/password", status_code=204)
+    async def change_password(
+        account_id: str,
+        body: ChangePasswordRequest,
+        authorization: str | None = Header(None),
+    ):
+        session_account = _session_account(authorization)
+        if session_account != account_id:
+            raise ForbiddenError("Cannot change another account's password.")
+        rec = store.get_account(account_id)
+        if rec is None:
+            raise NotFoundError("Account does not exist.")
+        if not verify_password(body.current_password, rec.password_hash):
+            raise UnauthorizedError("Current password is incorrect.")
+        store.set_password(account_id, hash_password(body.new_password))
+        return JSONResponse(status_code=204, content=None)
 
     @app.post("/v1/accounts/{account_id}/keys", response_model=ApiKey, status_code=201)
     async def create_key(account_id: str, body: CreateKeyRequest, authorization: str | None = Header(None)):
@@ -402,6 +501,76 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         store.revoke_api_key(key_id)
         return JSONResponse(status_code=204, content=None)
 
+    # ── admin (account management, admin-gated) ──────────────────────────
+    def _admin_account_view(a: AccountRecord) -> AdminAccount:
+        """Build the admin view of an account, computing the EFFECTIVE
+        capabilities with the same formula as the enforcement layer."""
+        return AdminAccount(
+            account_id=a.account_id,
+            username=a.username,
+            is_admin=a.is_admin,
+            can_work=a.can_work,
+            can_use=a.can_use,
+            banned=a.banned,
+            effective_can_work=_can_work(a.account_id),
+            effective_can_use=_can_use(a.account_id),
+            created_at=_iso(a.created_at),
+        )
+
+    @app.get("/v1/admin/permissions", response_model=PermissionState)
+    async def admin_permission_state(authorization: str | None = Header(None)):
+        """Current pool-wide permissionless switches (admin only)."""
+        _require_admin(authorization)
+        return PermissionState(
+            work_permissionless=settings.work_permissionless,
+            use_permissionless=settings.use_permissionless,
+        )
+
+    @app.get("/v1/admin/accounts", response_model=list[AdminAccount])
+    async def admin_list_accounts(authorization: str | None = Header(None)):
+        """List all accounts with their permission booleans (admin only)."""
+        _require_admin(authorization)
+        return [_admin_account_view(a) for a in store.list_accounts()]
+
+    @app.patch("/v1/admin/accounts/{account_id}", response_model=AdminAccount)
+    async def admin_update_account(
+        account_id: str,
+        body: UpdateAccountPermissionsRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Toggle one account's permissions (admin only).
+
+        Each present field is set; absent fields are left untouched. Demoting
+        the last remaining admin is rejected (the pool must always have one).
+        """
+        _require_admin(authorization)
+        target = store.get_account(account_id)
+        if target is None:
+            raise NotFoundError("Account does not exist.")
+        if body.is_admin is None and body.can_work is None and body.can_use is None and body.banned is None:
+            raise BadRequestError("No permission field to update.")
+
+        # "Cannot demote the last admin": if this removes admin from the last
+        # admin, reject. (Self-demotion is allowed as long as another admin
+        # remains — see design notes.)
+        if body.is_admin is False and target.is_admin:
+            if store.count_admins() <= 1:
+                raise ConflictError(
+                    "last_admin",
+                    "Last Admin",
+                    "Cannot demote the last remaining admin.",
+                )
+
+        store.update_account_permissions(
+            account_id,
+            is_admin=body.is_admin,
+            can_work=body.can_work,
+            can_use=body.can_use,
+            banned=body.banned,
+        )
+        updated = store.get_account(account_id)
+        return _admin_account_view(updated)
+
     # ── workers ──────────────────────────────────────────────────────────
     @app.post("/v1/workers/register", response_model=Worker, status_code=201)
     async def register_worker(
@@ -412,6 +581,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         account_id, scope, _ = _api_key(authorization)
         if scope != "worker":
             raise ForbiddenError("A user key cannot register workers.")
+        if not _can_work(account_id):
+            raise ForbiddenError("This account is not permitted to provide workers.")
 
         # Which API key is registering? We bind it to the created worker so a
         # worker-scoped key later uniquely identifies its worker — required
@@ -690,6 +861,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         account_id, scope, key_id = _api_key(authorization)
         if scope != "user":
             raise ForbiddenError("Only a user key can send inference requests.")
+        if not _can_use(account_id):
+            raise ForbiddenError("This account is not permitted to use inference.")
 
         body = await request.json()
         model = body.get("model")
@@ -1061,6 +1234,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 account_id = rec.account_id
         if account_id is None:
             await websocket.close(code=4401)
+            return
+        acct = store.get_account(account_id)
+        if acct is not None and acct.banned:
+            await websocket.close(code=4403)
             return
         w = store.get_worker(worker_id)
         if w is None or w.account_id != account_id:

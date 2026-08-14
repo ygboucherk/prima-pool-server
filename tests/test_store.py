@@ -114,6 +114,61 @@ def test_migrate_existing_db_adds_api_key_worker_id(tmp_path):
     assert s2.resolve_api_key("sk-worker-test").worker_id == "wrk_1"
 
 
+def test_migrate_existing_db_adds_account_permissions(tmp_path):
+    """A pre-v0.7 accounts table is upgraded in place: the four permission
+    columns are added with the historical defaults (non-admin, can work + use,
+    not banned), and existing rows read back with those defaults."""
+    import sqlite3
+
+    db = str(tmp_path / "store.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE accounts (account_id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL, created_at REAL NOT NULL);
+        """
+    )
+    conn.execute("INSERT INTO accounts VALUES ('acc_1','alice','h',1.0)")
+    conn.commit()
+    conn.close()
+
+    s = Store(path=db)
+    acc = s.get_account("acc_1")
+    assert acc is not None
+    # Migrated (pre-v0.7) rows keep the HISTORICAL open-pool default: can_work=True.
+    assert acc.is_admin is False
+    assert acc.can_work is True
+    assert acc.can_use is True
+    assert acc.banned is False
+    # NEW accounts use the new default: can_work=False, can_use=True.
+    new = s.create_account("bob", "hunter2hunter2")
+    assert new is not None
+    assert new.is_admin is False
+    assert new.can_work is False
+    assert new.can_use is True
+    assert new.banned is False
+    s.close()
+
+
+def test_account_permission_roundtrip_and_last_admin(tmp_path):
+    s = Store(path=str(tmp_path / "store.db"))
+    acc = s.create_account("alice", "hunter2hunter2")
+    assert acc is not None
+    assert s.count_admins() == 0
+    # New account default: cannot work, can use.
+    assert acc.can_work is False and acc.can_use is True
+    assert s.update_account_permissions(acc.account_id, is_admin=True)
+    assert s.count_admins() == 1
+    got = s.get_account(acc.account_id)
+    assert got.is_admin and not got.can_work and got.can_use and not got.banned
+    # Toggle flags.
+    assert s.update_account_permissions(acc.account_id, can_work=True, banned=True)
+    got = s.get_account(acc.account_id)
+    assert got.can_work is True and got.banned is True
+    # List accounts reflects the flags.
+    assert s.list_accounts()[0].username == "alice"
+
+
 def test_worker_persistence_roundtrip(tmp_path):
     path = str(tmp_path / "store.db")
     s = Store(path=path)

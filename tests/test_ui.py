@@ -52,6 +52,19 @@ def test_gui_static_assets_served(client: TestClient):
         assert r.status_code == 200, path
 
 
+def test_gui_has_account_tab_and_change_password_form(client: TestClient):
+    r = client.get("/ui")
+    assert r.status_code == 200
+    # Account tab button in the sidebar.
+    assert 'data-tab="account"' in r.text
+    assert "Account" in r.text
+    # Change-password form fields.
+    assert 'id="change-password-form"' in r.text
+    assert 'id="cp-current"' in r.text
+    assert 'id="cp-new"' in r.text
+    assert 'id="cp-confirm"' in r.text
+
+
 def test_dashboard_requires_session(client: TestClient):
     r = client.get("/v1/accounts/acc_1/dashboard")
     assert r.status_code == 401

@@ -12,6 +12,8 @@ servers:
 tags:
   - name: accounts
     description: Account registration, login, and scoped API key management.
+  - name: admin
+    description: Admin-only account management (permissions, bans).
   - name: workers
     description: Worker device registration, state, heartbeat.
   - name: clusters
@@ -63,6 +65,33 @@ paths:
                 $ref: "#/components/schemas/Session"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /accounts/{account_id}/password:
+    post:
+      tags: [accounts]
+      operationId: changePassword
+      summary: Change the account's password (requires the current password).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Password changed. Existing API keys and sessions remain valid.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /accounts/{account_id}/keys:
     post:
@@ -140,6 +169,10 @@ paths:
                 properties:
                   account_id: { type: string }
                   username: { type: string }
+                  is_admin: { type: boolean }
+                  can_work: { type: boolean }
+                  can_use: { type: boolean }
+                  banned: { type: boolean }
                   workers:
                     type: array
                     items:
@@ -187,6 +220,82 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /admin/permissions:
+    get:
+      tags: [admin]
+      operationId: getPermissionState
+      summary: Current pool-wide permissionless switches (admin only).
+      security:
+        - sessionAuth: []
+      responses:
+        "200":
+          description: The two permissionless switches.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/accounts:
+    get:
+      tags: [admin]
+      operationId: listAccounts
+      summary: List all accounts with their permission flags (admin only).
+      security:
+        - sessionAuth: []
+      responses:
+        "200":
+          description: All accounts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AdminAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/accounts/{account_id}:
+    patch:
+      tags: [admin]
+      operationId: updateAccountPermissions
+      summary: Toggle one account's permission flags (admin only).
+      description: >
+        Each present field sets the account's value; absent fields are left
+        untouched. Demoting the last remaining admin is rejected (409).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAccountPermissionsRequest"
+      responses:
+        "200":
+          description: Updated account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAccount"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /models:
     get:
@@ -806,6 +915,44 @@ components:
           type: string
           format: date-time
 
+    AdminAccount:
+      type: object
+      required: [account_id, username, is_admin, can_work, can_use, banned, effective_can_work, effective_can_use, created_at]
+      properties:
+        account_id: { type: string }
+        username: { type: string }
+        is_admin: { type: boolean }
+        can_work: { type: boolean }
+        can_use: { type: boolean }
+        banned: { type: boolean }
+        effective_can_work:
+          type: boolean
+          description: "(not banned) and (can_work or work_permissionless)"
+        effective_can_use:
+          type: boolean
+          description: "(not banned) and (can_use or use_permissionless)"
+        created_at:
+          type: string
+          format: date-time
+
+    PermissionState:
+      type: object
+      required: [work_permissionless, use_permissionless]
+      properties:
+        work_permissionless: { type: boolean }
+        use_permissionless: { type: boolean }
+
+    UpdateAccountPermissionsRequest:
+      type: object
+      properties:
+        is_admin: { type: boolean }
+        can_work: { type: boolean }
+        can_use: { type: boolean }
+        banned: { type: boolean }
+      description: >
+        Each present field sets the account's value; absent fields are left
+        untouched. At least one field must be present.
+
     LoginRequest:
       type: object
       required: [username, password]
@@ -821,6 +968,13 @@ components:
         expires_at:
           type: string
           format: date-time
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string, format: password }
+        new_password: { type: string, format: password }
 
     CreateKeyRequest:
       type: object
@@ -1186,10 +1340,10 @@ components:
           minItems: 2
           maxItems: 2
           items: { type: number }
-          description: [prompt, completion] summed over the account's worker rows.
+          description: "[prompt, completion] summed over the account's worker rows."
         effective_tokens:
           type: array
           minItems: 2
           maxItems: 2
           items: { type: number }
-          description: [prompt, completion] share-scaled, summed over the account's worker rows.
+          description: "[prompt, completion] share-scaled, summed over the account's worker rows."

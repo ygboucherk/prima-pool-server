@@ -28,7 +28,7 @@ diff their WG config against a new peer list. This is deliberately deferred from
 ## Known v0 gap: mid-request failure
 
 A cluster is **dissolved when any member goes offline** (see
-[negotiation.md](negotiation.md#5-waitlist-and-cluster-formation)), so an active member that drops
+[negotiation.md](negotiation.md#6-waitlist-and-cluster-formation)), so an active member that drops
 mid-request triggers dissolution:
 
 - The whole cluster is returned to the waitlist; a request in flight may fail.

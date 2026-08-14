@@ -22,6 +22,11 @@ def build_account_overview(store: Store, account_id: str) -> dict:
     return {
         "account_id": account_id,
         "username": account.username if account else None,
+        # Permission booleans so the GUI can render an admin panel.
+        "is_admin": bool(account.is_admin) if account else False,
+        "can_work": bool(account.can_work) if account else False,
+        "can_use": bool(account.can_use) if account else False,
+        "banned": bool(account.banned) if account else False,
         "workers": [
             {
                 "worker_id": w.worker_id,

@@ -4,7 +4,8 @@ Replaces the JSON-snapshot store with a proper SQLite database (single file,
 atomic transactions, WAL for concurrent readers, relational integrity via FKs).
 
 Schema:
-  accounts(id, username unique, password_hash, created_at)
+  accounts(id, username unique, password_hash, created_at, is_admin, can_work,
+          can_use, banned)
   api_keys(id, account_id FK, name, scope, key_hash unique, created_at)
   workers(id, account_id FK, model, gguf_sha256, memory_mb, status, online,
           cluster_id FK, last_heartbeat, assignable_at, created_at,
@@ -51,7 +52,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     account_id   TEXT PRIMARY KEY,
     username     TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    created_at   REAL NOT NULL
+    created_at   REAL NOT NULL,
+    is_admin     INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
+    can_work     INTEGER NOT NULL DEFAULT 0 CHECK (can_work IN (0, 1)),
+    can_use      INTEGER NOT NULL DEFAULT 1 CHECK (can_use IN (0, 1)),
+    banned       INTEGER NOT NULL DEFAULT 0 CHECK (banned IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
 
@@ -166,6 +171,20 @@ def _worker_to_row(w: WorkerRecord) -> dict:
         "assigned_ip": w.assigned_ip,
         "ring_position": w.ring_position,
     }
+
+
+def _row_to_account(row: sqlite3.Row) -> AccountRecord:
+    """Reconstruct an AccountRecord from a row (tolerates pre-v0.7 columns)."""
+    return AccountRecord(
+        account_id=row["account_id"],
+        username=row["username"],
+        password_hash=row["password_hash"],
+        created_at=row["created_at"],
+        is_admin=bool(row["is_admin"]) if "is_admin" in row.keys() else False,
+        can_work=bool(row["can_work"]) if "can_work" in row.keys() else True,
+        can_use=bool(row["can_use"]) if "can_use" in row.keys() else True,
+        banned=bool(row["banned"]) if "banned" in row.keys() else False,
+    )
 
 
 def _row_to_worker(row: sqlite3.Row) -> WorkerRecord:
@@ -455,6 +474,40 @@ class Store:
             self._populate_cluster_members_from_json()
             self._drop_cluster_json_columns()
             logger.info("migrated clusters: membership JSON → cluster_members table")
+        # v0.7: accounts gain the permission booleans (is_admin, can_work,
+        # can_use, banned). Existing (pre-v0.7) rows are backfilled with the
+        # HISTORICAL open-pool defaults — non-admin, can_work + can_use, not
+        # banned — so an upgrade never silently strips a running provider of
+        # its compute. NOTE this deliberately diverges from the _SCHEMA default
+        # for FRESH databases, where can_work defaults to 0 (a new registrant
+        # must be granted can_work by an admin). The ALTER's NOT NULL DEFAULT
+        # backfills existing rows without an explicit UPDATE. Idempotent: the
+        # guard checks for a column that only post-v0.7 accounts have.
+        acols = {r[1] for r in self._conn.execute("PRAGMA table_info(accounts)")}
+        if "is_admin" not in acols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (is_admin IN (0, 1))"
+            )
+            logger.info("migrated accounts: added column is_admin")
+        if "can_work" not in acols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN can_work INTEGER NOT NULL DEFAULT 1 "
+                "CHECK (can_work IN (0, 1))"
+            )
+            logger.info("migrated accounts: added column can_work")
+        if "can_use" not in acols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN can_use INTEGER NOT NULL DEFAULT 1 "
+                "CHECK (can_use IN (0, 1))"
+            )
+            logger.info("migrated accounts: added column can_use")
+        if "banned" not in acols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN banned INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (banned IN (0, 1))"
+            )
+            logger.info("migrated accounts: added column banned")
 
     def _populate_cluster_members_from_json(self) -> None:
         """Copy membership from the legacy JSON columns into cluster_members.
@@ -562,9 +615,20 @@ class Store:
             conn.executescript(_SCHEMA)
             for a in data.get("accounts", []):
                 conn.execute(
-                    "INSERT OR IGNORE INTO accounts (account_id, username, password_hash, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (a["account_id"], a["username"], a["password_hash"], a.get("created_at", 0)),
+                    "INSERT OR IGNORE INTO accounts "
+                    "(account_id, username, password_hash, created_at, "
+                    " is_admin, can_work, can_use, banned) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        a["account_id"],
+                        a["username"],
+                        a["password_hash"],
+                        a.get("created_at", 0),
+                        int(a.get("is_admin", 0)),
+                        int(a.get("can_work", 1)),
+                        int(a.get("can_use", 1)),
+                        int(a.get("banned", 0)),
+                    ),
                 )
             for k in data.get("api_keys", []):
                 conn.execute(
@@ -641,9 +705,20 @@ class Store:
             with self._lock:
                 with self._conn:
                     self._conn.execute(
-                        "INSERT INTO accounts (account_id, username, password_hash, created_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (rec.account_id, rec.username, rec.password_hash, rec.created_at),
+                        "INSERT INTO accounts "
+                        "(account_id, username, password_hash, created_at, "
+                        " is_admin, can_work, can_use, banned) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            rec.account_id,
+                            rec.username,
+                            rec.password_hash,
+                            rec.created_at,
+                            int(rec.is_admin),
+                            int(rec.can_work),
+                            int(rec.can_use),
+                            int(rec.banned),
+                        ),
                     )
         except sqlite3.IntegrityError:
             return None
@@ -651,11 +726,68 @@ class Store:
 
     def get_account_by_username(self, username: str) -> AccountRecord | None:
         row = self._fetch_one("SELECT * FROM accounts WHERE username = ?", (username,))
-        return AccountRecord(**dict(row)) if row else None
+        return _row_to_account(row) if row else None
 
     def get_account(self, account_id: str) -> AccountRecord | None:
         row = self._fetch_one("SELECT * FROM accounts WHERE account_id = ?", (account_id,))
-        return AccountRecord(**dict(row)) if row else None
+        return _row_to_account(row) if row else None
+
+    def list_accounts(self) -> list[AccountRecord]:
+        rows = self._fetch_all("SELECT * FROM accounts ORDER BY created_at")
+        return [_row_to_account(r) for r in rows]
+
+    def count_admins(self) -> int:
+        row = self._fetch_one(
+            "SELECT COUNT(*) AS n FROM accounts WHERE is_admin = 1", ()
+        )
+        return int(row["n"]) if row else 0
+
+    def update_account_permissions(
+        self,
+        account_id: str,
+        *,
+        is_admin: bool | None = None,
+        can_work: bool | None = None,
+        can_use: bool | None = None,
+        banned: bool | None = None,
+    ) -> bool:
+        """Patch an account's permission booleans (admin-gated).
+
+        Only the fields that are not None are updated. Returns False if the
+        account does not exist. Callers are responsible for the "last admin"
+        guard (which must re-read admins atomically — see app.update_account).
+        """
+        fields: list[str] = []
+        values: list = []
+        for col, val in (
+            ("is_admin", is_admin),
+            ("can_work", can_work),
+            ("can_use", can_use),
+            ("banned", banned),
+        ):
+            if val is not None:
+                fields.append(f"{col} = ?")
+                values.append(int(val))
+        if not fields:
+            return False
+        values.append(account_id)
+        with self._lock:
+            with self._conn:
+                cur = self._conn.execute(
+                    f"UPDATE accounts SET {', '.join(fields)} WHERE account_id = ?",
+                    values,
+                )
+        return cur.rowcount > 0
+
+    def set_password(self, account_id: str, password_hash: str) -> bool:
+        """Replace an account's password hash. Returns False if the account doesn't exist."""
+        with self._lock:
+            with self._conn:
+                cur = self._conn.execute(
+                    "UPDATE accounts SET password_hash = ? WHERE account_id = ?",
+                    (password_hash, account_id),
+                )
+        return cur.rowcount > 0
 
     # ── api keys ─────────────────────────────────────────────────────────
     def create_api_key(self, account_id: str, name: str, scope: str) -> tuple[ApiKeyRecord, str]:

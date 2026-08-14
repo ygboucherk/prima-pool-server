@@ -221,8 +221,57 @@ idempotently):
 | v0.4 | `api_keys.worker_id` — links a worker-scoped key to the worker it registered (disambiguates per-worker cluster calls) |
 | v0.5 | `clusters.layer_windows_json` — per-worker layer distribution reported by the head; live-cluster backfill to `{}` |
 | v0.6 | Membership JSON blobs (`members_json`/`ready_json`/`ips_json`/`layer_windows_json`) → relational `cluster_members` junction table; `clusters.distribution_reported` flag |
+| v0.7 | `accounts.is_admin`/`can_work`/`can_use`/`banned` — the account permission model (existing rows backfilled to `can_work = true`, the historical open-pool behavior) |
 
-### 2.5 Verify
+### 2.5 Accounts & permissions (admin)
+
+Every account carries four booleans — `is_admin`, `can_work`, `can_use`, `banned`.
+A **newly registered account** defaults to `can_use = true` (may run inference)
+and `can_work = false` (may **not** provide compute until an admin grants it).
+`banned` is a hard gate that overrides everything — login, sessions, API keys,
+and the worker WebSocket all reject a banned account.
+
+What an account can **actually** do is:
+
+```
+effective_can_work = (not banned) and (can_work or PRIMA_POOL_WORK_PERMISSIONLESS)
+effective_can_use  = (not banned) and (can_use  or PRIMA_POOL_USE_PERMISSIONLESS)
+```
+
+Both `*_PERMISSIONLESS` switches default to `true` when unset (the historical
+open pool). Set one to `false` to gate that axis — then an account needs its own
+flag enabled by an admin to use it.
+
+**First admin bootstrap.** There is no self-serve way to become an admin (admin
+actions require an admin), so the operator seeds the first one via the env var:
+
+```bash
+# .env — created as admin on startup ONLY if no admin exists yet
+PRIMA_POOL_FIRST_ACCOUNT=operator:hunter2hunter2
+```
+
+It's idempotent: it never clobbers an existing account or re-promotes a demoted
+one. On a fresh deploy it creates the account (as admin) on first startup. On a
+pool that already has an admin it does nothing.
+
+**Managing accounts.** Log in as the admin and open the **Admin** tab in the web
+GUI (`/ui`), or use the API directly:
+
+```bash
+# List all accounts + their flags (and effective capabilities)
+curl http://<server>:8000/v1/admin/accounts \
+  -H "Authorization: Bearer <admin-session-token>"
+
+# Toggle a flag (present fields are set; absent fields left untouched)
+curl -X PATCH http://<server>:8000/v1/admin/accounts/<account_id> \
+  -H "Authorization: Bearer <admin-session-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"can_work": true}'
+```
+
+Demoting the **last** admin is rejected (the pool must always have one).
+
+### 2.6 Verify
 
 ```bash
 # OpenAPI docs

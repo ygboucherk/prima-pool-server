@@ -59,6 +59,19 @@ class Settings:
     # Worker policy
     max_workers_per_account: int = _env_int("PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT", 5)
 
+    # Account permission policy (admin/user + can_work/can_use).
+    # The *_PERMISSIONLESS switches make the corresponding capability available
+    # to EVERY non-banned account regardless of its per-account flag. They take
+    # explicit true/false values; when UNSET they default to true (permissionless
+    # — the historical open-pool behavior). Only their presence opts a pool into
+    # gating that axis.
+    work_permissionless: bool = _env_bool("PRIMA_POOL_WORK_PERMISSIONLESS", True)
+    use_permissionless: bool = _env_bool("PRIMA_POOL_USE_PERMISSIONLESS", True)
+    # First-account bootstrap: "username:password" (username has no colon).
+    # Created as admin on startup IFF no admin account exists yet. Idempotent —
+    # never clobbers an existing account or re-promotes a demoted one.
+    first_account: str = os.environ.get("PRIMA_POOL_FIRST_ACCOUNT", "")
+
     # Model registry (v0: static config). slug -> ModelDef.
     models: dict[str, ModelDef] = field(default_factory=lambda: _parse_models())
     # The port the head's llama-server listens on (proxied by the server).
