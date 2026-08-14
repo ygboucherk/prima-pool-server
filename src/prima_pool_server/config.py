@@ -95,7 +95,9 @@ class Settings:
     # Whether the server actually joins the WG network (proxy enabled).
     server_join_wg: bool = _env_bool("PRIMA_POOL_SERVER_JOIN_WG", False)
 
-    # Relay (not implemented in v0; present so configs can carry the field)
+    # Relay fallback for NAT'd members (implemented — see docs/guides/setup.md Part 6).
+    # The server renders the relay block into each member's cluster config; the
+    # client runs a relay monitor that routes unreachable peers via the relay.
     relay_enabled: bool = _env_bool("PRIMA_POOL_RELAY_ENABLED", False)
     relay_pubkey: str = os.environ.get("PRIMA_POOL_RELAY_PUBKEY", "")
     relay_endpoint: str = os.environ.get("PRIMA_POOL_RELAY_ENDPOINT", "")

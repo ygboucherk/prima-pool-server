@@ -155,7 +155,7 @@ class Account(BaseModel):
     created_at: str
     # Integer balance in 10^-12 token units (ERC20-style minor units).
     # Transported as a JSON string so clients (and float64) never lose
-    # precision once the value exceeds 2^53 (~9 tokens).
+    # precision once the value exceeds 2^53 (~9000 tokens).
     balance: int = 0
 
     @field_serializer("balance")

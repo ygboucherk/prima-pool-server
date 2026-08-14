@@ -16,7 +16,7 @@ On connect, the server sends a `hello` frame carrying the negotiated cadence and
 (the worker should treat this as authoritative):
 
 ```json
-{ "type": "hello", "state": { "status": "waitlisted" }, "cadence": { "heartbeat_s": 10, "ws_reconnect_backoff_s": [1, 30] } }
+{ "type": "hello", "state": { "status": "waitlisted", "online": false }, "cadence": { "heartbeat_s": 10, "ws_reconnect_backoff_s": [1, 30] } }
 ```
 
 ### Frames (v0)
@@ -126,7 +126,7 @@ same ring from `GET /config`.
       "endpoint": "203.0.113.22:51820",
       "allowed_ips": ["10.23.7.3/32"],
       "persistent_keepalive": 25,
-      "preferred": "relay"
+      "preferred": "relay"   // only set when the peer reported behind_nat (see note below)
     }
   ]
 }
@@ -145,6 +145,11 @@ Notes:
   the tunnel.
 - `relay.enabled` tells the worker that a relay path exists and should be used as fallback.
 - `preferred: direct` is the initial preference; switching to relay is a runtime decision (see §4).
+  In practice every peer is `direct` today: the server only marks a peer `preferred: "relay"`
+  when it registered with `behind_nat: true`, and the client does not yet detect NAT (it always
+  reports `false` — see [negotiation.md](negotiation.md#5-worker-device-registration)). The
+  `"relay"` value in the example above is reserved for when NAT detection lands; the relay is
+  engaged in v0 through the runtime fallback path in §4.
 
 ### Error
 
@@ -199,8 +204,9 @@ The cluster becomes **live** (routable) only when BOTH conditions hold:
 
 The distribution is "reported" even when it is unknown (`{}`, e.g. the head's stdout parse failed)
 — liveness must never be blocked by a log parse. Live clusters always carry a distribution field
-(possibly `{}` = unknown) for accounting/worker-crediting. If the member set still contains a
-failed member after the readiness timeout (default 60 s), the cluster formation may be retried.
+(possibly `{}` = unknown) for accounting/worker-crediting. There is no server-side readiness
+timeout and no `failed` member state in v0 — a cluster missing a ready member (or a
+distribution) simply stays `assembling` until the condition is met.
 
 ## 6. State recovery
 

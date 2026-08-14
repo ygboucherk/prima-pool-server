@@ -31,7 +31,7 @@ Why integer minor units rather than a float or a decimal column:
 
 `balance` is serialized as a **JSON string** (`"1500000000000"`), not a
 JSON number. JSON numbers are float64, which can only represent integers
-exactly up to 2⁵³ ≈ 9.007×10¹⁵ — above that (≈ 9 tokens) a balance would
+exactly up to 2⁵³ ≈ 9.007×10¹⁵ — above that (≈ 9000 tokens) a balance would
 silently round. The dashboard likewise does `BigInt` string math for
 formatting and input parsing; never `parseFloat(x) * 1e12`.
 

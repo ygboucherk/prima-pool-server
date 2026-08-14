@@ -26,10 +26,10 @@ multiple-peer — v0 uses per-assignment keys).
 
 ## 2. Health tracking (server side)
 
-The server considers a member **healthy** if any of:
-
-- it receives a `POST /v1/workers/{id}/heartbeat` (default every 10 s), or
-- it receives a WS `pong` within the heartbeat window.
+The server considers a member **healthy** when it receives a
+`POST /v1/workers/{id}/heartbeat` (default every 10 s). There is no WS ping/pong
+liveness path in v0 — the client never sends `ping`, and the REST heartbeat is the
+sole liveness signal.
 
 A member is **offline** after 3 missed heartbeats (~30 s). Being offline is **transient and
 orthogonal to registration**:
@@ -103,9 +103,14 @@ over the tunnel to the head. This requires `NET_ADMIN` + `/dev/net/tun` on the s
 
 ## 5. Readiness timeout
 
-The server waits up to **60 s** for all members to report readiness after the last
-`cluster_assigned` push; members that miss it are marked `failed` and cluster formation may be
-retried (see [assignment.md](assignment.md#5-readiness-handshake)).
+There is **no server-side readiness timeout** in v0: a cluster stays `assembling` until
+every member has reported ready AND the head has reported the layer distribution. A member
+that never reports ready simply leaves the cluster stuck in `assembling` — there is no
+`failed` member state and no automatic retry. The only timeout is **client-side**: the head
+waits up to `PRIMA_POOL_PRIMA_READY_TIMEOUT_S` (default **600 s**) for prima.cpp to print
+its `"model loaded"` marker, after which it reports ready with an "unknown" distribution
+(`{}`) so the cluster can still go live. Non-head members report ready immediately with no
+timeout (see [assignment.md](assignment.md#5-readiness-handshake)).
 
 ## 6. Leaving
 

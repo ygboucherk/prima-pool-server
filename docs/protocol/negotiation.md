@@ -70,7 +70,7 @@ re-read on every request, so a toggle takes effect on the next request.
 ```json
 {
   "username": "alice",
-  "password": "hunter2"
+  "password": "correct-horse-battery-staple"
 }
 ```
 
@@ -91,7 +91,8 @@ re-read on every request, so a toggle takes effect on the next request.
 | 400    | `invalid_request`                   | Missing/invalid fields                          |
 | 409    | `username_taken`                    | Username already registered                     |
 
-The password is stored hashed (e.g. bcrypt/argon2); it is never returned.
+The password is stored as a salted **scrypt** hash (`scrypt$N$r$p$salt$hash`); it is never
+returned.
 
 ## 3. Login (session token)
 
@@ -102,7 +103,7 @@ To manage API keys, the account logs in and receives a short-lived session token
 **Request**
 
 ```json
-{ "username": "alice", "password": "hunter2" }
+{ "username": "alice", "password": "correct-horse-battery-staple" }
 ```
 
 **Success — `200 OK`**
@@ -151,8 +152,9 @@ Lists the account's keys (id, name, scope, created_at — **not** the secret).
 
 ### `DELETE /v1/accounts/{account_id}/keys/{key_id}`  (auth: session token)
 
-Revokes a key. Revoking a worker key permanently invalidates that worker's credential and removes
-it from any waitlist/cluster (churn is v1+; see [churn.md](churn.md)). This is **distinct from
+Revokes a key. Revoking a worker key permanently invalidates that worker's credential — its next
+heartbeat then fails with 401, and the normal liveness sweep marks it offline and removes it from
+any waitlist/cluster (churn is v1+; see [churn.md](churn.md)). This is **distinct from
 going offline**: an offline worker keeps its key and can return; a revoked key cannot be reused
 (the worker must be re-registered with a new key).
 
@@ -183,8 +185,8 @@ entity and adds it to `model.waitlist`.
   "endpoint": {
     "host": "203.0.113.10",
     "port": 51820,
-    "behind_nat": true,
-    "nat_type": "cone"               // "none" | "cone" | "symmetric" | "unknown"
+    "behind_nat": false,
+    "nat_type": "unknown"            // "none" | "cone" | "symmetric" | "unknown"
   },
   "hardware": {
     "cpu": "AMD Ryzen 9 5950X",
@@ -206,8 +208,12 @@ Notes:
   problem.
 - `wg_pubkey` and `endpoint` are the device's **own WireGuard interface**, generated locally. The
   private key never leaves the device.
-- `behind_nat` / `nat_type` are self-reported (ideally from a STUN probe). The server uses them to
-  decide whether to prefer direct peering or relay.
+- `behind_nat` / `nat_type` are self-reported. **TODO (important):** NAT detection is not yet
+  implemented — the client currently always sends `behind_nat: false, nat_type: "unknown"` (there
+  is no STUN probe), so the server's `preferred: "relay"` selection is never triggered and relay
+  fallback only ever engages via the client's 120 s handshake-staleness path. Real NAT detection
+  (STUN self-report) is a high-priority follow-up, because reliably supporting NAT'd providers
+  would greatly expand the pool's reach.
 - One account may run **multiple workers** (e.g. the same model on several machines). The server
   enforces a per-account worker cap and rejects a second worker for the **same device** (same WG
   pubkey). Each worker-scoped key is bound to the worker it registered, so cluster readiness and
@@ -221,9 +227,12 @@ Notes:
   "account_id": "acc_01HZ2...",
   "status": "waitlisted",
   "model": "llama-3.1-8b-instruct",
-  "waitlist_position": 2
+  "online": false
 }
 ```
+
+`waitlist_position` is reserved in the schema but always `null` in v0 — the server does not
+track waitlist positions (they shift as workers join/leave, so the field is never populated).
 
 **Liveness**: a worker is `online: false` until it sends its first heartbeat after registering
 (registration is a one-shot API call, not a liveness signal). The server marks it `offline` and
@@ -250,8 +259,8 @@ currently part of an active cluster (v1+).
 - The server groups workers into a **cluster** when
   `sum(worker.memory_allocated_mb for worker in model.waitlist) >= model.required_memory_mb`.
 - Exactly how many workers get grouped, and in what order, is the **scheduler's** job
-  (see [scheduler.md](../../design/scheduler.md)). The protocol only defines the trigger and the
-  resulting assignment.
+  (the grouping policy lives in the server's `scheduler.py`). The protocol only defines the
+  trigger and the resulting assignment.
 - The pool's registered models (slug + authoritative GGUF hash + required memory) are
   discoverable via the unauthenticated `GET /v1/models`. A worker that advertises a hash
   different from the registered one is rejected at registration (400).
@@ -278,23 +287,24 @@ dissolution is v1+ (see [churn.md](churn.md)).
 | ------------------------- | ---------- | -------------------------------------------- |
 | Heartbeat interval        | 10 s       | `POST /v1/workers/{id}/heartbeat`            |
 | Heartbeat timeout         | 30 s       | 3 missed heartbeats → worker marked offline  |
-| WS reconnect backoff      | 1 s → 30 s | exponential, capped                         |
-| Assignment poll fallback  | 30 s       | if WS unavailable, poll `GET /state`         |
+| WS reconnect backoff      | 1 s → 30 s | 1 s, then 30 s (fixed backoff, not exponential) |
 
 These are defaults; the server may push its preferred cadence in a `hello` frame after the WS
 handshake.
 
 ## 8. Abuse model & rate limiting
 
-- **Login brute-force**: `POST /accounts/login` must be rate-limited and/or throttle on repeated
-  failures (e.g. per-IP + per-username backoff). A `429 too_many_requests` problem response is
-  expected.
-- **Worker proliferation**: a single account could create unbounded workers. v0 should cap workers
-  per account (default suggestion: a modest limit, e.g. 5) and rate-limit `POST /workers/register`.
-- **Heartbeat flood**: heartbeats are cheap but unauthenticated rate-limiting is not needed (they
-  are key-authenticated); still, the server may enforce a per-worker minimum heartbeat interval.
-- These are enforcement notes for the server implementation; the protocol itself only needs the
-  `429` error response defined (RFC 7807, as in §9).
+Rate limiting is **not enforced in v0**: the `429 too_many_requests` problem response is defined
+(`TooManyRequestsError` and the OpenAPI `TooManyRequests` component) but nothing raises it. The
+worker-per-account cap **is** enforced (`PRIMA_POOL_MAX_WORKERS_PER_ACCOUNT`, default 5). The
+notes below are forward-looking hardening, not current behavior:
+
+- **Login brute-force**: `POST /accounts/login` should eventually be rate-limited and/or throttle
+  on repeated failures (e.g. per-IP + per-username backoff).
+- **Worker proliferation**: the per-account cap exists; rate-limiting `POST /workers/register`
+  is not implemented.
+- **Heartbeat flood**: heartbeats are key-authenticated; a per-worker minimum heartbeat interval
+  could be enforced but is not in v0.
 
 ## 9. Errors
 

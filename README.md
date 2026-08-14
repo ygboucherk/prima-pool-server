@@ -105,7 +105,7 @@ of `1500000000000` means `1.5` tokens.
   arithmetic is integer (`+`/`-`), never float.
 - **Serialized as a decimal string** on the wire (e.g. `"1500000000000"`)
   so clients never lose precision — a JSON `number` is float64 and cannot
-  represent values above 2⁵³ exactly (~9 tokens). The dashboard uses
+  represent values above 2⁵³ exactly (~9000 tokens). The dashboard uses
   `BigInt` string math for the same reason.
 - Admins can **set** (`PUT .../balance`) or **adjust** (`POST .../balance/adjust`
   with a signed `delta`, no sign restriction — balances may go negative).

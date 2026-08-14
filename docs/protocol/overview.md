@@ -13,7 +13,7 @@ WireGuard only being established *after* negotiation succeeds.
 | ---------- | --------------------------------------------- | ---------------- | ----------------------------- | ------------------------------- |
 | **Control**| registration, workers, assignment, heartbeats  | HTTPS + WSS (JSON) | scoped API key (Bearer)     | reliable, low-frequency, stateless-ish |
 | **Data**   | prima.cpp inference traffic between members   | WireGuard         | WG keys (issued at negotiation) | low latency, high throughput, only between negotiated peers |
-| **Billing**| usage reports, balances                       | HTTPS (same as control) | API key              | tamper-evident; **out of v0 scope** (see [usage-and-accounting.md](usage-and-accounting.md)) |
+| **Billing**| usage reports, balances                       | HTTPS (same as control) | API key              | user-side usage + balances implemented; worker crediting out of v0 scope (see [usage-and-accounting.md](usage-and-accounting.md)) |
 
 Key rule: **WireGuard is never in the negotiation path.** Workers first prove who they are and
 what they can serve over HTTPS; only then does the server hand out cluster/WireGuard configuration.
@@ -36,14 +36,16 @@ authenticated, negotiated peers.
 
 | In scope                                                  | Out of scope (v1+)                                   |
 | --------------------------------------------------------- | ---------------------------------------------------- |
-| Account registration (username + password)                | Usage reporting & accounting endpoints               |
+| Account registration (username + password)                | Worker-side crediting & debit-on-use                |
 | **Account permissions (admin/user + can_work/can_use/ban)** |                                                     |
 | Scoped API key creation (worker / user)                   | Server-initiated eviction / rebalancing (churn)      |
 | Worker device registration via worker key                 | NAT traversal beyond WG + STUN self-report           |
 | Per-model waitlists, cluster formation                    | Signed/verifiable usage reports                      |
-| Cluster assignment (WS push) + config retrieval           | Payment / billing                                   |
+| Cluster assignment (WS push) + config retrieval           | Pricing tiers / rate tables                         |
 | WireGuard tunnel bring-up (direct-first, relay fallback)  |                                                      |
 | Readiness handshake, heartbeat, liveness                  |                                                      |
+| Usage reporting & accounting (user-side)                  |                                                      |
+| Per-account balance (state + admin controls)              |                                                      |
 | Multiple workers per account (one device == one worker)   |                                                      |
 | Offline workers: removed from waitlist, re-added on return |                                                     |
 | Worker-initiated leave                                    |                                                     |
