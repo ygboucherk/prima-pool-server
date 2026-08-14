@@ -263,8 +263,9 @@ curl -X POST http://<server>:8000/v1/accounts/<account_id>/worker-stats \
   -d '{"windows": [[0, 9999999999]], "worker_ids": ["wrk_..."]}'
 ```
 
-Each worker-log entry carries `{request_id, worker_id, model, prompt_tokens,
-completion_tokens, share, effective_prompt, effective_completion, created_at}`.
+Each worker-log entry carries `{request_id, worker_id, model, cluster_id,
+prompt_tokens, completion_tokens, share, effective_prompt, effective_completion,
+created_at}`.
 `share`/`effective_*` are `null` when the cluster's layer distribution is
 unknown; a forwarder (`layer_window 0`) gets `share 0.0` and `effective 0.0`.
 The worker-stats endpoint returns per-window `{model: {total_tokens: [prompt,
@@ -323,7 +324,9 @@ pytest
 ```
 src/prima_pool_server/
 ├── app.py        # FastAPI app (REST + WS + proxy endpoints)
+├── cli.py        # Entry point (uvicorn runner + .env loading)
 ├── config.py     # Settings
+├── dashboard.py  # Account-scoped dashboard data
 ├── errors.py     # RFC 7807 problem details
 ├── liveness.py   # Background heartbeat monitor
 ├── models.py     # Pydantic schemas + domain dataclasses
@@ -332,7 +335,8 @@ src/prima_pool_server/
 ├── security.py   # Password hashing, tokens, key generation
 ├── store.py      # SQLite-backed store (accounts/key/workers/clusters)
 ├── wg_server.py  # Server-side WireGuard (join clusters)
-└── ws_hub.py     # WebSocket push hub
+├── ws_hub.py     # WebSocket push hub
+└── ui/           # Static dashboard (HTML/CSS/JS)
 ```
 
 ## Background
