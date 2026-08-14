@@ -564,8 +564,6 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
 
   /workers/{worker_id}/state:
     get:
@@ -601,7 +599,11 @@ paths:
         - $ref: "#/components/parameters/WorkerId"
       responses:
         "200":
-          description: Heartbeat acknowledged.
+          description: Heartbeat acknowledged; returns the worker's current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Worker"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1097,7 +1099,9 @@ components:
           description: >
             Exact balance in 10^-12 token units. Accepts a JSON integer or a
             decimal string (for values above 2^53).
-          type: string
+          anyOf:
+            - type: string
+            - type: integer
         reason:
           type: string
           description: Optional operator memo recorded on the event.
@@ -1110,7 +1114,9 @@ components:
           description: >
             Signed change in 10^-12 token units (negative = deduction). Accepts
             a JSON integer or a decimal string (for values above 2^53).
-          type: string
+          anyOf:
+            - type: string
+            - type: integer
         reason:
           type: string
           description: Optional operator memo recorded on the event.

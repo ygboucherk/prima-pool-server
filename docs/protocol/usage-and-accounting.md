@@ -65,9 +65,10 @@ forwarder (`layer_window = 0`) gets `share = 0.0` and `effective = 0.0`.
 Three endpoints expose this (auth: user key OR session token):
 
 - `GET /v1/accounts/{id}/worker-logs?begin=&end=&limit=` — per-request-per-worker
-  entries `{request_id, worker_id, model, prompt_tokens, completion_tokens,
-  share, effective_prompt, effective_completion, created_at}` in `[begin, end)`,
-  newest first. A request appears once per owned worker in its cluster.
+  entries `{request_id, worker_id, model, cluster_id, prompt_tokens,
+  completion_tokens, share, effective_prompt, effective_completion,
+  created_at}` in `[begin, end)`, newest first. A request appears once per owned
+  worker in its cluster.
 - `GET /v1/accounts/{id}/worker-logs/latest?limit=N` — the account's most recent
   `N` worker-attributed entries, newest first (default 50).
 - `POST /v1/accounts/{id}/worker-stats` with

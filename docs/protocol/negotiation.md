@@ -247,8 +247,9 @@ also removes it from the cluster (churn is v1+; see [churn.md](churn.md)).
 
 **Success — `204 No Content`**
 
-**Errors** — `404 not_found` if the worker doesn't exist; `409 worker_in_use` if the worker is
-currently part of an active cluster (v1+).
+**Errors** — `404 not_found` if the worker doesn't exist. (A `409 worker_in_use` is reserved
+for v1+: in v0, revoking a worker that is currently serving in a cluster dissolves that cluster
+and deletes the worker, rather than blocking.)
 
 ## 6. Waitlist and cluster formation
 

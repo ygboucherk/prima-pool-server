@@ -208,10 +208,11 @@ database** — a single file that survives restarts:
   the Docker volume).
 
 The schema is a handful of relational tables: `accounts`, `api_keys`, `workers`,
-`clusters`, `cluster_members` (membership junction), and `requests` (usage
-accounting). Document-shaped fields that are read/written as a whole (worker
-endpoint, hardware) stay as JSON columns; membership — which is queried and
-updated per-member — is relational.
+`clusters`, `cluster_members` (membership junction), `requests` (usage
+accounting), and `balance_events` (the append-only balance audit trail).
+Document-shaped fields that are read/written as a whole (worker endpoint,
+hardware) stay as JSON columns; membership — which is queried and updated
+per-member — is relational.
 
 Schema upgrade history (for reference; all applied automatically and
 idempotently):
@@ -222,6 +223,7 @@ idempotently):
 | v0.5 | `clusters.layer_windows_json` — per-worker layer distribution reported by the head; live-cluster backfill to `{}` |
 | v0.6 | Membership JSON blobs (`members_json`/`ready_json`/`ips_json`/`layer_windows_json`) → relational `cluster_members` junction table; `clusters.distribution_reported` flag |
 | v0.7 | `accounts.is_admin`/`can_work`/`can_use`/`banned` — the account permission model (existing rows backfilled to `can_work = true`, the historical open-pool behavior) |
+| v0.8 | `accounts.balance_minor` — per-account integer balance (10⁻¹² token units, default 0); `balance_events` append-only audit table (set/adjust history) |
 
 ### 2.5 Accounts & permissions (admin)
 
@@ -465,9 +467,16 @@ to the `./relay-peers` file (hot-reloaded every `PEER_RELOAD_S` seconds):
   `PRIMA_POOL_WG_ENDPOINT_HOST` explicitly). For symmetric NAT / CGNAT where
   direct peering fails, a **relay** provides fallback (see
   [Part 6 — Relay](#part-6--relay-fallback-optional)).
-- **The web GUI is account-scoped** — it shows the logged-in account's own
-  workers/keys, not a global operator view.
-- **No usage/billing** yet (v1).
+- **The web GUI is account-scoped by default** — the dashboard at `/ui` shows the
+  logged-in account's own workers, keys, and balance. Admins additionally get an
+  **Admin** tab (visible only to `is_admin` accounts) with a global view of all
+  accounts: their permission flags, effective capabilities, and balances.
+- **Usage accounting & balances are stored and visible, but not yet enforced**:
+  the server logs every inference request and exposes per-account usage
+  endpoints (account-level and worker-attributed), and balances can be set /
+  adjusted by admins and viewed by their owner. **Debit-on-use** (deducting a
+  balance on inference) and **worker crediting** (paying workers for served
+  work) remain v1.
 - **Cluster formation is not yet a single transaction** — the scheduler selects
   workers from the waitlist and assigns them in a multi-step write (subnet
   allocation, cluster + membership insert, per-worker assignment). Individual

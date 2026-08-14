@@ -52,11 +52,11 @@ v0 does **not** auto-evict; it only records liveness.
 
 ### Heartbeat
 
-`POST /v1/workers/{id}/heartbeat` — `200 OK`, body optional (server may return cadence
-adjustments). Auth: the worker key that owns `{id}` **or** the owning account's session token
-(dual-auth); a credential cannot heartbeat another worker. The server may return
-`{ "status": "waitlisted" }` to signal the worker has been re-added to the waitlist after being
-offline.
+`POST /v1/workers/{id}/heartbeat` — `200 OK`. Auth: the worker key that owns `{id}` **or** the
+owning account's session token (dual-auth); a credential cannot heartbeat another worker. The
+server returns the worker's current state as a `Worker` object (`worker_id`, `account_id`,
+`status`, `model`, `online`) — e.g. `status: "waitlisted"` signals the worker has been re-added
+to the waitlist after being offline.
 
 ## 3. Server joins the cluster network (option A, inference proxy)
 

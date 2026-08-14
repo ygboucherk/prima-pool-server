@@ -28,7 +28,7 @@ On connect, the server sends a `hello` frame carrying the negotiated cadence and
 | `cluster_dissolved`  | server → client | `cluster_id`, `reason` (member offline / member left)    |
 | `cluster_evicted`    | server → client | `reason` (v1; worker-initiated leave uses REST instead)  |
 | `layer_distribution` | client → server | `cluster_id`, `layer_windows` (rank → layer count). Sent by the HEAD (rank 0) once its prima.cpp is ready; the server records it on the cluster (rank mapped to worker_id via member order) and it is REQUIRED (along with all members' readiness) for the cluster to go live. An empty `layer_windows` (`{}`) means "unknown" (parse failure) and still satisfies the gate. |
-| `ping` / `pong`      | both            | keepalive                                                |
+| `ping` / `pong`      | client → server / server → client | keepalive. The server replies `pong` to a client `ping`; the v0 client does **not** send `ping` (the REST heartbeat is the sole liveness signal) |
 
 ### Recovery rule
 
