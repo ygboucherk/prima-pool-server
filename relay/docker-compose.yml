@@ -27,6 +27,8 @@ services:
       WG_INTERFACE: ${WG_INTERFACE:-prima-relay}
       # Set a fixed private key to keep the pubkey stable across restarts.
       WG_PRIVATE_KEY: ${WG_PRIVATE_KEY:-}
+      # How often (seconds) the peers file is re-read and hot-reloaded.
+      PEER_RELOAD_S: ${PEER_RELOAD_S:-15}
     cap_add:
       - NET_ADMIN
     devices:
