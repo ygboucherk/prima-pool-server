@@ -5,7 +5,7 @@ atomic transactions, WAL for concurrent readers, relational integrity via FKs).
 
 Schema:
   accounts(id, username unique, password_hash, created_at, is_admin, can_work,
-          can_use, banned)
+          can_use, banned, balance_minor)
   api_keys(id, account_id FK, name, scope, key_hash unique, created_at)
   workers(id, account_id FK, model, gguf_sha256, memory_mb, status, online,
           cluster_id FK, last_heartbeat, assignable_at, created_at,
@@ -15,6 +15,8 @@ Schema:
                   layer_window, PRIMARY KEY(cluster_id, worker_id),
                   UNIQUE(cluster_id, ring_position))
   requests(id, account_id FK, key_id FK, model, cluster_id FK, tokens, created_at)
+  balance_events(event_id, account_id, admin_account_id, kind, delta,
+                 balance_before, balance_after, reason, created_at)
 
 JSON columns are used ONLY for document-shaped fields that are read/written as
 a whole (endpoint/hardware on workers). Membership (order, ready set, ip map,
@@ -36,6 +38,7 @@ from . import security
 from .models import (
     AccountRecord,
     ApiKeyRecord,
+    BalanceEventRecord,
     ClusterRecord,
     ClusterStatus,
     EndpointInfo,
@@ -56,7 +59,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     is_admin     INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
     can_work     INTEGER NOT NULL DEFAULT 0 CHECK (can_work IN (0, 1)),
     can_use      INTEGER NOT NULL DEFAULT 1 CHECK (can_use IN (0, 1)),
-    banned       INTEGER NOT NULL DEFAULT 0 CHECK (banned IN (0, 1))
+    banned       INTEGER NOT NULL DEFAULT 0 CHECK (banned IN (0, 1)),
+    balance_minor INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
 
@@ -149,6 +153,20 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS idx_requests_account ON requests(account_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_requests_key ON requests(key_id);
 CREATE INDEX IF NOT EXISTS idx_requests_cluster ON requests(cluster_id);
+
+CREATE TABLE IF NOT EXISTS balance_events (
+    event_id        TEXT PRIMARY KEY,
+    account_id      TEXT NOT NULL,
+    admin_account_id TEXT,
+    kind            TEXT NOT NULL CHECK (kind IN ('set', 'adjust')),
+    delta           INTEGER NOT NULL,
+    balance_before  INTEGER NOT NULL,
+    balance_after   INTEGER NOT NULL,
+    reason          TEXT,
+    created_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_balance_events_account
+    ON balance_events(account_id, created_at);
 """
 
 
@@ -174,7 +192,7 @@ def _worker_to_row(w: WorkerRecord) -> dict:
 
 
 def _row_to_account(row: sqlite3.Row) -> AccountRecord:
-    """Reconstruct an AccountRecord from a row (tolerates pre-v0.7 columns)."""
+    """Reconstruct an AccountRecord from a row (tolerates pre-v0.8 columns)."""
     return AccountRecord(
         account_id=row["account_id"],
         username=row["username"],
@@ -184,6 +202,21 @@ def _row_to_account(row: sqlite3.Row) -> AccountRecord:
         can_work=bool(row["can_work"]) if "can_work" in row.keys() else True,
         can_use=bool(row["can_use"]) if "can_use" in row.keys() else True,
         banned=bool(row["banned"]) if "banned" in row.keys() else False,
+        balance=int(row["balance_minor"]) if "balance_minor" in row.keys() else 0,
+    )
+
+
+def _row_to_balance_event(row: sqlite3.Row) -> BalanceEventRecord:
+    return BalanceEventRecord(
+        event_id=row["event_id"],
+        account_id=row["account_id"],
+        admin_account_id=row["admin_account_id"],
+        kind=row["kind"],
+        delta=int(row["delta"]),
+        balance_before=int(row["balance_before"]),
+        balance_after=int(row["balance_after"]),
+        reason=row["reason"],
+        created_at=row["created_at"],
     )
 
 
@@ -508,6 +541,15 @@ class Store:
                 "CHECK (banned IN (0, 1))"
             )
             logger.info("migrated accounts: added column banned")
+        # v0.8: accounts gain a balance (integer, 10^-18 token units). Existing
+        # rows backfill to 0 (an empty balance) via the ALTER's NOT NULL
+        # DEFAULT — no explicit UPDATE needed, and idempotent (the guard checks
+        # for the column that only post-v0.8 accounts have).
+        if "balance_minor" not in acols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN balance_minor INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("migrated accounts: added column balance_minor")
 
     def _populate_cluster_members_from_json(self) -> None:
         """Copy membership from the legacy JSON columns into cluster_members.
@@ -617,8 +659,8 @@ class Store:
                 conn.execute(
                     "INSERT OR IGNORE INTO accounts "
                     "(account_id, username, password_hash, created_at, "
-                    " is_admin, can_work, can_use, banned) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " is_admin, can_work, can_use, banned, balance_minor) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         a["account_id"],
                         a["username"],
@@ -628,6 +670,7 @@ class Store:
                         int(a.get("can_work", 1)),
                         int(a.get("can_use", 1)),
                         int(a.get("banned", 0)),
+                        int(a.get("balance", 0)),
                     ),
                 )
             for k in data.get("api_keys", []):
@@ -707,8 +750,8 @@ class Store:
                     self._conn.execute(
                         "INSERT INTO accounts "
                         "(account_id, username, password_hash, created_at, "
-                        " is_admin, can_work, can_use, banned) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        " is_admin, can_work, can_use, banned, balance_minor) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             rec.account_id,
                             rec.username,
@@ -718,6 +761,7 @@ class Store:
                             int(rec.can_work),
                             int(rec.can_use),
                             int(rec.banned),
+                            int(rec.balance),
                         ),
                     )
         except sqlite3.IntegrityError:
@@ -788,6 +832,136 @@ class Store:
                     (password_hash, account_id),
                 )
         return cur.rowcount > 0
+
+    # ── balance ─────────────────────────────────────────────────────────
+    def _record_balance_event(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        account_id: str,
+        admin_account_id: str | None,
+        kind: str,
+        delta: int,
+        before: int,
+        after: int,
+        reason: str | None,
+    ) -> None:
+        """Insert one balance-mutation row (runs inside the caller's txn)."""
+        conn.execute(
+            "INSERT INTO balance_events "
+            "(event_id, account_id, admin_account_id, kind, delta, "
+            " balance_before, balance_after, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                security.new_id("bev"),
+                account_id,
+                admin_account_id,
+                kind,
+                delta,
+                before,
+                after,
+                reason,
+                time.time(),
+            ),
+        )
+
+    def get_balance(self, account_id: str) -> int | None:
+        """Return the account's balance, or None if the account doesn't exist."""
+        row = self._fetch_one(
+            "SELECT balance_minor FROM accounts WHERE account_id = ?", (account_id,)
+        )
+        return int(row["balance_minor"]) if row else None
+
+    def set_balance(
+        self,
+        account_id: str,
+        balance: int,
+        *,
+        admin_account_id: str | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        """Set an account's balance to an exact value, recording the event.
+
+        The mutation (UPDATE + event insert) is atomic under the store lock and
+        a single transaction — no drift between state and audit trail. Returns
+        False if the account does not exist.
+        """
+        with self._lock:
+            with self._conn:
+                row = self._conn.execute(
+                    "SELECT balance_minor FROM accounts WHERE account_id = ?",
+                    (account_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                before = int(row["balance_minor"])
+                cur = self._conn.execute(
+                    "UPDATE accounts SET balance_minor = ? WHERE account_id = ?",
+                    (balance, account_id),
+                )
+                if cur.rowcount == 0:
+                    return False
+                self._record_balance_event(
+                    self._conn,
+                    account_id=account_id,
+                    admin_account_id=admin_account_id,
+                    kind="set",
+                    delta=balance - before,
+                    before=before,
+                    after=balance,
+                    reason=reason,
+                )
+        return True
+
+    def adjust_balance(
+        self,
+        account_id: str,
+        delta: int,
+        *,
+        admin_account_id: str | None = None,
+        reason: str | None = None,
+    ) -> int | None:
+        """Adjust an account's balance by a signed delta (no sign restriction).
+
+        Returns the new balance, or None if the account does not exist. The
+        read-modify-write is atomic under the store lock.
+        """
+        with self._lock:
+            with self._conn:
+                row = self._conn.execute(
+                    "SELECT balance_minor FROM accounts WHERE account_id = ?",
+                    (account_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                before = int(row["balance_minor"])
+                after = before + delta
+                self._conn.execute(
+                    "UPDATE accounts SET balance_minor = ? WHERE account_id = ?",
+                    (after, account_id),
+                )
+                self._record_balance_event(
+                    self._conn,
+                    account_id=account_id,
+                    admin_account_id=admin_account_id,
+                    kind="adjust",
+                    delta=delta,
+                    before=before,
+                    after=after,
+                    reason=reason,
+                )
+        return after
+
+    def list_balance_events(
+        self, account_id: str, limit: int = 100
+    ) -> list[BalanceEventRecord]:
+        """Return the account's balance events, newest first."""
+        rows = self._fetch_all(
+            "SELECT * FROM balance_events WHERE account_id = ? "
+            "ORDER BY created_at DESC, event_id DESC LIMIT ?",
+            (account_id, limit),
+        )
+        return [_row_to_balance_event(r) for r in rows]
 
     # ── api keys ─────────────────────────────────────────────────────────
     def create_api_key(self, account_id: str, name: str, scope: str) -> tuple[ApiKeyRecord, str]:

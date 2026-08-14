@@ -9,7 +9,8 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 
 ## What it does
 
-- **Accounts** — register/login, scoped API keys (`worker` / `user`)
+- **Accounts** — register/login, scoped API keys (`worker` / `user`), and a
+  per-account integer **balance** (see [Balances](#balances))
 - **Workers** — device registration, per-model waitlists, heartbeat-driven liveness;
   worker endpoints accept EITHER the worker key OR the owning account's session token.
   One account may run **multiple workers** (e.g. the same model on several machines);
@@ -45,7 +46,8 @@ implementation of the negotiation protocol defined in `docs/protocol/*.md` and
 
 Out of scope for v0: worker-side crediting (the other half of accounting),
 eviction/rebalance (churn), and automatic relay orchestration (a manual relay
-deployment is documented in the setup guide Part 6).
+deployment is documented in the setup guide Part 6). Balances are stored and
+admin-manageable, but nothing yet debits or credits them automatically.
 
 ## Accounts & permissions
 
@@ -86,9 +88,49 @@ the API:
 - `GET /v1/admin/permissions` — current permissionless switches
 - `GET /v1/admin/accounts` — all accounts + their flags
 - `PATCH /v1/admin/accounts/{account_id}` — toggle `is_admin`/`can_work`/`can_use`/`banned`
+- `PUT /v1/admin/accounts/{account_id}/balance` — set a balance (see [Balances](#balances))
+- `POST /v1/admin/accounts/{account_id}/balance/adjust` — add/subtract a signed delta
+- `GET /v1/admin/accounts/{account_id}/balance/events` — the account's balance history
 
 Guards: demoting the **last** admin is rejected (the pool must always have one).
 Self-demotion is allowed as long as another admin remains.
+
+## Balances
+
+Each account carries an integer **balance**, in units of **10⁻¹⁸ token**
+(ERC20-style minor units — the same idea as a token's `decimals`). So a balance
+of `1500000000000000000` means `1.5` tokens.
+
+- Stored as an exact `INTEGER` in the DB (`accounts.balance_minor`); all
+  arithmetic is integer (`+`/`-`), never float.
+- **Serialized as a decimal string** on the wire (e.g. `"1500000000000000000"`)
+  so clients never lose precision — a JSON `number` is float64 and cannot
+  represent values above 2⁵³ exactly (~0.009 tokens). The dashboard uses
+  `BigInt` string math for the same reason.
+- Admins can **set** (`PUT .../balance`) or **adjust** (`POST .../balance/adjust`
+  with a signed `delta`, no sign restriction — balances may go negative).
+- A user can view their **own** balance (`GET /v1/accounts/{id}/balance`) and
+  **own** balance history (`GET /v1/accounts/{id}/balance/events`), using their
+  session token or a user-scoped API key. The acting admin's identity is only
+  exposed to admins.
+- Every mutation is recorded in an append-only `balance_events` table (kind,
+  signed delta, before/after, optional `reason` memo, acting admin). The
+  `account_id` is deliberately **not** a foreign key, so history survives any
+  future account deletion (mirrors `requests.cluster_id` /
+  `cluster_members.worker_id`).
+
+Nothing consumes the balance yet: inference does **not** deduct from it, and
+worker-side crediting does **not** accrue to it. This is the storage + admin
+control + visibility layer only. The debit-on-use path (per-request deduction,
+streaming token counts known only at stream end, multi-account cluster
+attribution) and the pricing tiers (token·layer vs per-token, per-model rates)
+remain future work — see `docs/protocol/billing-balances.md`.
+
+> **Known limit:** `balance_minor` is a SQLite `INTEGER` (64-bit signed), so a
+> single balance is capped at 2⁶³⁻¹ minor units ≈ **9.2 tokens**. Requests
+> outside that range are rejected with 422. When real billing lands, the escape
+> hatch is re-denominating (e.g. to 10⁻²⁴ units) or moving to a `TEXT`/decimal
+> column.
 
 > **Note (rate limiting out of scope):** with `PRIMA_POOL_USE_PERMISSIONLESS=true`
 > (the default), there is no admission control on `/v1/chat/completions` beyond

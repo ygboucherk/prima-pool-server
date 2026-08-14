@@ -491,10 +491,81 @@
   }
 
   // ── account tab ──────────────────────────────────────────────────────
+  // Balances are exact integers in 10^-18 token units (ERC20-style minor
+  // units). The API transports them as decimal strings to avoid float64 loss,
+  // so we format with BigInt string math, never Number.
+  const BALANCE_DECIMALS = 18n;
+
+  function formatBalance(minorStr) {
+    try {
+      const v = BigInt(minorStr);
+      const sign = v < 0n ? '-' : '';
+      const abs = v < 0n ? -v : v;
+      const whole = abs / (10n ** BALANCE_DECIMALS);
+      const frac = abs % (10n ** BALANCE_DECIMALS);
+      let fracStr = frac.toString().padStart(18, '0').replace(/0+$/, '');
+      return sign + whole.toString() + (fracStr ? '.' + fracStr : '');
+    } catch (e) {
+      return minorStr;
+    }
+  }
+
+  // Parse a decimal token amount ("1.5" or "1.500") into exact minor units.
+  // Rejects >18 decimal places and non-numeric input.
+  function parseTokensToMinor(text) {
+    const s = String(text).trim();
+    if (!s) return null;
+    const m = s.match(/^(-?)(\d+)(?:\.(\d*))?$/);
+    if (!m) return null;
+    const sign = m[1] === '-' ? -1n : 1n;
+    const whole = m[2] || '0';
+    let frac = m[3] || '';
+    if (frac.length > 18) return null;
+    frac = frac.padEnd(18, '0');
+    return sign * (BigInt(whole) * (10n ** BALANCE_DECIMALS) + BigInt(frac || '0'));
+  }
+
   function renderAccount() {
     if (!overview) return;
     $('account-username').textContent = overview.username || '—';
     $('account-id').textContent = overview.account_id || accountId || '—';
+    $('account-balance').textContent = formatBalance(overview.balance);
+  }
+
+  async function refreshAccountBalance() {
+    if (!sessionToken || !accountId) return;
+    try {
+      const b = await api('/v1/accounts/' + accountId + '/balance');
+      $('account-balance').textContent = formatBalance(b.balance);
+      const events = await api('/v1/accounts/' + accountId + '/balance/events?limit=50');
+      renderBalanceEvents(events, 'account-balance-events-body');
+    } catch (e) {
+      handleApiError(e);
+    }
+  }
+
+  function renderBalanceEvents(events, tbodyId) {
+    const tbody = $(tbodyId);
+    tbody.innerHTML = '';
+    if (!events.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No balance events</td></tr>';
+      return;
+    }
+    for (const ev of events) {
+      const tr = document.createElement('tr');
+      const when = new Date(ev.created_at).toLocaleString();
+      const delta = formatBalance(ev.delta);
+      const after = formatBalance(ev.balance_after);
+      const deltaTxt = ev.delta && ev.delta[0] === '-' ? delta : '+' + delta;
+      const reason = ev.reason ? escapeHtml(ev.reason) : '—';
+      tr.innerHTML = `
+        <td>${when}</td>
+        <td><span class="badge ${ev.kind}">${ev.kind}</span></td>
+        <td>${deltaTxt}</td>
+        <td>${after}</td>
+        <td>${reason}</td>`;
+      tbody.appendChild(tr);
+    }
   }
 
   async function changePassword(current, next) {
@@ -578,9 +649,62 @@
       $('admin-work-perm').textContent = perm.work_permissionless ? 'true' : 'false';
       $('admin-use-perm').textContent = perm.use_permissionless ? 'true' : 'false';
       renderAdminAccounts(accounts, perm);
+      renderAdminBalances(accounts);
     } catch (e) {
       handleApiError(e);
     }
+  }
+
+  function renderAdminBalances(accounts) {
+    const tbody = $('admin-balances-body');
+    tbody.innerHTML = '';
+    if (!accounts.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="empty">No accounts</td></tr>';
+      return;
+    }
+    for (const a of accounts) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(a.username)}</td>
+        <td class="bal-value" data-account="${a.account_id}">${formatBalance(a.balance)}</td>
+        <td>
+          <input type="text" class="bal-input" data-account="${a.account_id}" placeholder="+/- tokens" aria-label="Balance delta for ${escapeHtml(a.username)}">
+          <button type="button" class="admin-toggle bal-adjust-btn" data-account="${a.account_id}">adjust</button>
+        </td>`;
+      tr.querySelector('.bal-adjust-btn').addEventListener('click', () => {
+        adjustBalance(a.account_id, tr.querySelector('.bal-input').value);
+      });
+      tr.querySelector('.bal-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') adjustBalance(a.account_id, e.target.value);
+      });
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function adjustBalance(targetId, raw) {
+    const minor = parseTokensToMinor(raw);
+    if (minor === null) {
+      setAdminBalanceMessage('Invalid amount — enter e.g. "1.5" or "-0.25" (up to 18 decimals).', 'err');
+      return;
+    }
+    try {
+      await api('/v1/admin/accounts/' + targetId + '/balance/adjust', {
+        method: 'POST',
+        body: JSON.stringify({ delta: minor.toString() }),
+      });
+      setAdminBalanceMessage('Balance updated.', 'ok');
+      await refreshAdminTab();
+    } catch (e) {
+      setAdminBalanceMessage(e.message, 'err');
+      handleApiError(e);
+    }
+  }
+
+  function setAdminBalanceMessage(text, cls) {
+    const el = $('admin-balance-message');
+    el.textContent = text;
+    el.className = 'form-message ' + (cls || '');
+    el.hidden = false;
   }
 
   async function toggleAccountPermission(accountId, field, value) {
@@ -617,7 +741,7 @@
     if (name === 'keys') renderKeys(overview ? overview.keys : []);
     if (name === 'usage') refreshUsageTab();
     if (name === 'workers') refreshWorkersTab();
-    if (name === 'account') renderAccount();
+    if (name === 'account') { renderAccount(); refreshAccountBalance(); }
     if (name === 'admin') refreshAdminTab();
   }
 

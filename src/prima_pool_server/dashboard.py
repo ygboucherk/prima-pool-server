@@ -27,6 +27,9 @@ def build_account_overview(store: Store, account_id: str) -> dict:
         "can_work": bool(account.can_work) if account else False,
         "can_use": bool(account.can_use) if account else False,
         "banned": bool(account.banned) if account else False,
+        # Account balance (10^-18 token units). Transported as a decimal string
+        # so the browser (float64) never loses precision on large balances.
+        "balance": str(account.balance) if account else "0",
         "workers": [
             {
                 "worker_id": w.worker_id,

@@ -65,6 +65,16 @@ def test_gui_has_account_tab_and_change_password_form(client: TestClient):
     assert 'id="cp-confirm"' in r.text
 
 
+def test_gui_has_balance_views(client: TestClient):
+    r = client.get("/ui")
+    assert r.status_code == 200
+    # Account tab shows the account's balance + balance-history table.
+    assert 'id="account-balance"' in r.text
+    assert 'id="account-balance-events-body"' in r.text
+    # Admin tab has the balances table.
+    assert 'id="admin-balances-body"' in r.text
+
+
 def test_dashboard_requires_session(client: TestClient):
     r = client.get("/v1/accounts/acc_1/dashboard")
     assert r.status_code == 401

@@ -26,10 +26,14 @@ from .errors import (
 from .liveness import LivenessMonitor
 from .models import (
     Account,
+    AccountBalance,
     AccountRecord,
     AdminAccount,
+    AdminBalanceEvent,
+    AdjustBalanceRequest,
     ApiKey,
     ApiKeySummary,
+    BalanceEvent,
     ClusterConfig,
     ClusterInfo,
     ClusterMemberInfo,
@@ -46,6 +50,7 @@ from .models import (
     RequestLogEntry,
     RequestRecord,
     Session,
+    SetBalanceRequest,
     UpdateAccountPermissionsRequest,
     UsageStatsRequest,
     Worker,
@@ -436,6 +441,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             account_id=rec.account_id,
             username=rec.username,
             created_at=_iso(rec.created_at),
+            balance=rec.balance,
         )
 
     @app.post("/v1/accounts/login", response_model=Session)
@@ -501,6 +507,52 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         store.revoke_api_key(key_id)
         return JSONResponse(status_code=204, content=None)
 
+    # ── balance (account-scoped) ────────────────────────────────────────
+    @app.get("/v1/accounts/{account_id}/balance", response_model=AccountBalance)
+    async def account_balance(account_id: str, authorization: str | None = Header(None)):
+        """Return the account's own balance.
+
+        Auth: user-scoped API key OR the account session token.
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's balance.")
+        balance = store.get_balance(account_id)
+        if balance is None:
+            raise NotFoundError("Account does not exist.")
+        return AccountBalance(account_id=account_id, balance=balance)
+
+    @app.get(
+        "/v1/accounts/{account_id}/balance/events",
+        response_model=list[BalanceEvent],
+    )
+    async def account_balance_events(
+        account_id: str,
+        limit: int = 100,
+        authorization: str | None = Header(None),
+    ):
+        """Return the account's own balance events, newest first.
+
+        Auth: user-scoped API key OR the account session token. The acting
+        admin's identity is NOT exposed here (admin-only detail).
+        """
+        if _user_credential(authorization) != account_id:
+            raise ForbiddenError("Cannot view another account's balance.")
+        if store.get_account(account_id) is None:
+            raise NotFoundError("Account does not exist.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        return [
+            BalanceEvent(
+                event_id=rec.event_id,
+                kind=rec.kind,
+                delta=rec.delta,
+                balance_after=rec.balance_after,
+                reason=rec.reason,
+                created_at=_iso(rec.created_at),
+            )
+            for rec in store.list_balance_events(account_id, limit=limit)
+        ]
+
     # ── admin (account management, admin-gated) ──────────────────────────
     def _admin_account_view(a: AccountRecord) -> AdminAccount:
         """Build the admin view of an account, computing the EFFECTIVE
@@ -515,6 +567,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             effective_can_work=_can_work(a.account_id),
             effective_can_use=_can_use(a.account_id),
             created_at=_iso(a.created_at),
+            balance=a.balance,
         )
 
     @app.get("/v1/admin/permissions", response_model=PermissionState)
@@ -570,6 +623,93 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
         updated = store.get_account(account_id)
         return _admin_account_view(updated)
+
+    # ── admin (balance management, admin-gated) ─────────────────────────
+    def _balance_event_view(rec, admin_username: str | None = None) -> AdminBalanceEvent | BalanceEvent:
+        """Build a balance-event response; admin view adds the actor's identity."""
+        base = dict(
+            event_id=rec.event_id,
+            kind=rec.kind,
+            delta=rec.delta,
+            balance_after=rec.balance_after,
+            reason=rec.reason,
+            created_at=_iso(rec.created_at),
+        )
+        if admin_username is not None:
+            return AdminBalanceEvent(**base, admin_username=admin_username)
+        return BalanceEvent(**base)
+
+    @app.put("/v1/admin/accounts/{account_id}/balance", response_model=AccountBalance)
+    async def admin_set_balance(
+        account_id: str,
+        body: SetBalanceRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Set an account's balance to an exact value (admin only)."""
+        admin = _require_admin(authorization)
+        if store.get_account(account_id) is None:
+            raise NotFoundError("Account does not exist.")
+        store.set_balance(
+            account_id,
+            body.balance,
+            admin_account_id=admin.account_id,
+            reason=body.reason,
+        )
+        return AccountBalance(account_id=account_id, balance=body.balance)
+
+    @app.post(
+        "/v1/admin/accounts/{account_id}/balance/adjust",
+        response_model=AccountBalance,
+    )
+    async def admin_adjust_balance(
+        account_id: str,
+        body: AdjustBalanceRequest,
+        authorization: str | None = Header(None),
+    ):
+        """Adjust an account's balance by a signed delta (admin only).
+
+        No sign restriction: negative deltas (deductions) are allowed, and the
+        balance may go negative.
+        """
+        admin = _require_admin(authorization)
+        if store.get_account(account_id) is None:
+            raise NotFoundError("Account does not exist.")
+        new_balance = store.adjust_balance(
+            account_id,
+            body.delta,
+            admin_account_id=admin.account_id,
+            reason=body.reason,
+        )
+        return AccountBalance(account_id=account_id, balance=new_balance)
+
+    @app.get(
+        "/v1/admin/accounts/{account_id}/balance/events",
+        response_model=list[AdminBalanceEvent],
+    )
+    async def admin_balance_events(
+        account_id: str,
+        limit: int = 100,
+        authorization: str | None = Header(None),
+    ):
+        """List an account's balance events, newest first (admin only)."""
+        _require_admin(authorization)
+        if store.get_account(account_id) is None:
+            raise NotFoundError("Account does not exist.")
+        if limit < 1:
+            raise BadRequestError("'limit' must be at least 1.")
+        # Resolve the acting admin's username for each event (may be gone).
+        admin_names: dict[str, str] = {}
+        events = store.list_balance_events(account_id, limit=limit)
+        out: list[AdminBalanceEvent] = []
+        for rec in events:
+            if rec.admin_account_id:
+                if rec.admin_account_id not in admin_names:
+                    a = store.get_account(rec.admin_account_id)
+                    admin_names[rec.admin_account_id] = a.username if a else rec.admin_account_id
+                out.append(_balance_event_view(rec, admin_names[rec.admin_account_id]))
+            else:
+                out.append(_balance_event_view(rec, None))
+        return out
 
     # ── workers ──────────────────────────────────────────────────────────
     @app.post("/v1/workers/register", response_model=Worker, status_code=201)

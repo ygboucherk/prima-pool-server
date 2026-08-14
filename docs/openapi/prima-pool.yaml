@@ -173,6 +173,9 @@ paths:
                   can_work: { type: boolean }
                   can_use: { type: boolean }
                   banned: { type: boolean }
+                  balance:
+                    type: string
+                    description: Account balance in 10^-18 token units (decimal string).
                   workers:
                     type: array
                     items:
@@ -214,6 +217,66 @@ paths:
       responses:
         "204":
           description: Key revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /accounts/{account_id}/balance:
+    get:
+      tags: [accounts]
+      operationId: getBalance
+      summary: Return the account's own balance.
+      description: >
+        Auth: user-scoped API key OR the account session token. The balance is
+        an integer in 10^-18 token units, serialized as a decimal string.
+      security:
+        - sessionAuth: []
+        - userKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: The account's balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountBalance"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /accounts/{account_id}/balance/events:
+    get:
+      tags: [accounts]
+      operationId: listBalanceEvents
+      summary: Return the account's own balance events, newest first.
+      description: >
+        Auth: user-scoped API key OR the account session token. The acting
+        admin's identity is NOT exposed here (admin-only detail).
+      security:
+        - sessionAuth: []
+        - userKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: List of balance events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BalanceEvent"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -296,6 +359,99 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /admin/accounts/{account_id}/balance:
+    put:
+      tags: [admin]
+      operationId: setBalance
+      summary: Set an account's balance to an exact value (admin only).
+      description: >
+        The balance is an integer in 10^-18 token units; it may be sent as a
+        JSON number or a decimal string (for values above 2^53).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetBalanceRequest"
+      responses:
+        "200":
+          description: The account's new balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountBalance"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/accounts/{account_id}/balance/adjust:
+    post:
+      tags: [admin]
+      operationId: adjustBalance
+      summary: Adjust an account's balance by a signed delta (admin only).
+      description: >
+        No sign restriction: negative deltas (deductions) are allowed, and the
+        balance may go negative.
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdjustBalanceRequest"
+      responses:
+        "200":
+          description: The account's new balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountBalance"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/accounts/{account_id}/balance/events:
+    get:
+      tags: [admin]
+      operationId: listAdminBalanceEvents
+      summary: List an account's balance events, newest first (admin only).
+      security:
+        - sessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: List of balance events, with the acting admin's identity.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AdminBalanceEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /models:
     get:
@@ -814,6 +970,12 @@ components:
         `/clusters/.../ready`, the WS channel), EITHER the worker-scoped API
         key OR the owning account's session token is accepted (both must own
         the target worker).
+    userKeyAuth:
+      type: http
+      scheme: bearer
+      description: >
+        A user-scoped API key (`sk-user-...`), accepted alongside the session
+        token on account-scoped usage/balance endpoints.
   parameters:
     AccountId:
       name: account_id
@@ -907,17 +1069,85 @@ components:
 
     Account:
       type: object
-      required: [account_id, username, created_at]
+      required: [account_id, username, created_at, balance]
       properties:
         account_id: { type: string }
         username: { type: string }
         created_at:
           type: string
           format: date-time
+        balance:
+          type: string
+          description: Account balance in 10^-18 token units (decimal string).
+
+    AccountBalance:
+      type: object
+      required: [account_id, balance]
+      properties:
+        account_id: { type: string }
+        balance:
+          type: string
+          description: Account balance in 10^-18 token units (decimal string).
+
+    SetBalanceRequest:
+      type: object
+      required: [balance]
+      properties:
+        balance:
+          description: >
+            Exact balance in 10^-18 token units. Accepts a JSON integer or a
+            decimal string (for values above 2^53).
+          type: string
+        reason:
+          type: string
+          description: Optional operator memo recorded on the event.
+
+    AdjustBalanceRequest:
+      type: object
+      required: [delta]
+      properties:
+        delta:
+          description: >
+            Signed change in 10^-18 token units (negative = deduction). Accepts
+            a JSON integer or a decimal string (for values above 2^53).
+          type: string
+        reason:
+          type: string
+          description: Optional operator memo recorded on the event.
+
+    BalanceEvent:
+      type: object
+      required: [event_id, kind, delta, balance_after, created_at]
+      properties:
+        event_id: { type: string }
+        kind:
+          type: string
+          enum: [set, adjust]
+        delta:
+          type: string
+          description: Signed change in 10^-18 token units (decimal string).
+        balance_after:
+          type: string
+          description: Resulting balance (decimal string).
+        reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    AdminBalanceEvent:
+      allOf:
+        - $ref: "#/components/schemas/BalanceEvent"
+        - type: object
+          required: [admin_username]
+          properties:
+            admin_username:
+              type: string
+              description: Username of the admin who performed the mutation.
 
     AdminAccount:
       type: object
-      required: [account_id, username, is_admin, can_work, can_use, banned, effective_can_work, effective_can_use, created_at]
+      required: [account_id, username, is_admin, can_work, can_use, banned, effective_can_work, effective_can_use, created_at, balance]
       properties:
         account_id: { type: string }
         username: { type: string }
@@ -934,6 +1164,9 @@ components:
         created_at:
           type: string
           format: date-time
+        balance:
+          type: string
+          description: Account balance in 10^-18 token units (decimal string).
 
     PermissionState:
       type: object

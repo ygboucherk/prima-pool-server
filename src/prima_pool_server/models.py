@@ -9,7 +9,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+
+# Balance is stored in a SQLite INTEGER (64-bit signed). Values outside this
+# range raise OverflowError on insert, so request fields are bounded here to
+# yield a clean 422 instead. NOTE: 2^63-1 minor units == ~9.2 tokens (unit is
+# 10^-18 token), so the INTEGER ceiling is a real limit for large balances —
+# see the billing-balances design note (re-denomination / TEXT storage is the
+# escape hatch when real billing lands).
+_BALANCE_MIN = -(2**63)
+_BALANCE_MAX = 2**63 - 1
 
 
 # ── Enums ────────────────────────────────────────────────────────────────
@@ -69,6 +79,29 @@ class UpdateAccountPermissionsRequest(BaseModel):
     banned: bool | None = None
 
 
+class SetBalanceRequest(BaseModel):
+    """Admin: set an account's balance to an exact integer value.
+
+    The unit is 10^-18 token (ERC20-style minor units); the field accepts a
+    JSON integer or a numeric string (Pydantic coerces), so a client may send
+    a >2^53 value as a string to avoid float64 loss.
+    """
+
+    balance: int = Field(ge=_BALANCE_MIN, le=_BALANCE_MAX)
+    reason: str | None = None
+
+
+class AdjustBalanceRequest(BaseModel):
+    """Admin: adjust an account's balance by a signed integer delta.
+
+    No sign restriction — negative deltas are allowed (deductions), as is
+    going negative.
+    """
+
+    delta: int = Field(ge=_BALANCE_MIN, le=_BALANCE_MAX)
+    reason: str | None = None
+
+
 class CreateKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     scope: Literal["worker", "user"]
@@ -118,6 +151,14 @@ class Account(BaseModel):
     account_id: str
     username: str
     created_at: str
+    # Integer balance in 10^-18 token units (ERC20-style minor units).
+    # Transported as a JSON string so clients (and float64) never lose
+    # precision once the value exceeds 2^53 (~0.009 tokens).
+    balance: int = 0
+
+    @field_serializer("balance")
+    def _balance_str(self, value: int) -> str:
+        return str(value)
 
 
 class AdminAccount(BaseModel):
@@ -139,6 +180,49 @@ class AdminAccount(BaseModel):
     effective_can_work: bool
     effective_can_use: bool
     created_at: str
+    # Integer balance in 10^-18 token units (serialized as a string).
+    balance: int = 0
+
+    @field_serializer("balance")
+    def _balance_str(self, value: int) -> str:
+        return str(value)
+
+
+class BalanceEvent(BaseModel):
+    """One balance-mutation event, visible to the account owner.
+
+    `kind` is "set" (balance set to an absolute value) or "adjust" (balance
+    changed by a signed delta). `delta` is the signed change; `balance_after`
+    is the resulting balance. `reason` is an optional operator memo.
+    """
+
+    event_id: str
+    kind: str
+    delta: int
+    balance_after: int
+    reason: str | None
+    created_at: str
+
+    @field_serializer("delta", "balance_after")
+    def _int_str(self, value: int) -> str:
+        return str(value)
+
+
+class AdminBalanceEvent(BalanceEvent):
+    """Admin view of a balance event: adds the acting admin's identity."""
+
+    admin_username: str
+
+
+class AccountBalance(BaseModel):
+    """A user's own balance (10^-18 token units, serialized as a string)."""
+
+    account_id: str
+    balance: int
+
+    @field_serializer("balance")
+    def _balance_str(self, value: int) -> str:
+        return str(value)
 
 
 class PermissionState(BaseModel):
@@ -360,6 +444,10 @@ class AccountRecord:
     can_work: bool = False
     can_use: bool = True
     banned: bool = False
+    # Account balance in 10^-18 token units (ERC20-style minor units).
+    # Exact integer arithmetic only — no floats. Defaults to 0 for fresh and
+    # migrated accounts alike.
+    balance: int = 0
 
 
 @dataclass
@@ -461,4 +549,27 @@ class RequestRecord:
     cluster_id: str
     prompt_tokens: int
     completion_tokens: int
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class BalanceEventRecord:
+    """One balance-mutation event (append-only audit trail).
+
+    `account_id` is deliberately NOT a foreign key: balance history must
+    survive account deletion (same rationale as requests.cluster_id and
+    cluster_members.worker_id). `admin_account_id` records who performed the
+    mutation; it is also FK-less so history survives even that account's
+    deletion. `delta` is the signed change (set = balance_after - balance_before);
+    `balance_before`/`balance_after` capture the full state transition.
+    """
+
+    event_id: str
+    account_id: str
+    admin_account_id: str | None
+    kind: str  # "set" | "adjust"
+    delta: int
+    balance_before: int
+    balance_after: int
+    reason: str | None
     created_at: float = field(default_factory=time.time)

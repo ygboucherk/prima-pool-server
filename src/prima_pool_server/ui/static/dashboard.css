@@ -228,6 +228,20 @@ button.admin-toggle.muted {
 }
 button.admin-toggle.muted:hover { color: #4a5264; border-color: #1e2534; }
 
+/* Admin balance-adjust inputs. */
+.bal-input {
+  background: #10151f;
+  border: 1px solid #273049;
+  color: #e6e9f0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  width: 120px;
+}
+.bal-input:focus { outline: none; border-color: #2f6fed; }
+.badge.set { background: #23305a; color: #7fa0ff; }
+.badge.adjust { background: #273049; color: #aab4c8; }
+
 /* ── sidebar layout ─────────────────────────────────────────────────── */
 #view {
   display: flex;

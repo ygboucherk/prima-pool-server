@@ -124,13 +124,20 @@
 
           <h3>Account</h3>
           <table>
-            <thead><tr><th>Username</th><th>Account ID</th></tr></thead>
+            <thead><tr><th>Username</th><th>Account ID</th><th>Balance</th></tr></thead>
             <tbody>
               <tr>
                 <td id="account-username">—</td>
                 <td><code id="account-id">—</code></td>
+                <td id="account-balance">—</td>
               </tr>
             </tbody>
+          </table>
+
+          <h3>Balance history</h3>
+          <table>
+            <thead><tr><th>When</th><th>Kind</th><th>Delta</th><th>Balance after</th><th>Reason</th></tr></thead>
+            <tbody id="account-balance-events-body"><tr><td colspan="5" class="empty">No balance events</td></tr></tbody>
           </table>
 
           <h3>Change password</h3>
@@ -156,6 +163,13 @@
             </tbody>
           </table>
           <p class="hint">These values are set deployment-wise. In order to edit them, please contact the server operator.</p>
+
+          <h3>Balances</h3>
+          <table>
+            <thead><tr><th>Username</th><th>Balance</th><th>Adjust</th></tr></thead>
+            <tbody id="admin-balances-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+          </table>
+          <p id="admin-balance-message" class="form-message" hidden></p>
 
           <h3>Accounts</h3>
           <table>
