@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_serializer
 # range raise OverflowError on insert, so request fields are bounded here to
 # yield a clean 422 instead, and the store re-checks results against the same
 # bounds so a computed overflow (e.g. balance + delta) can't 500 either.
-# NOTE: 2^63-1 minor units == ~9.2 tokens (unit is 10^-18 token), so the
+# NOTE: 2^63-1 minor units == ~9.2M tokens (unit is 10^-12 token), so the
 # INTEGER ceiling is a real limit for large balances — see the billing-balances
 # design note (re-denomination / TEXT storage is the escape hatch when real
 # billing lands).
@@ -84,7 +84,7 @@ class UpdateAccountPermissionsRequest(BaseModel):
 class SetBalanceRequest(BaseModel):
     """Admin: set an account's balance to an exact integer value.
 
-    The unit is 10^-18 token (ERC20-style minor units); the field accepts a
+    The unit is 10^-12 token (ERC20-style minor units); the field accepts a
     JSON integer or a numeric string (Pydantic coerces), so a client may send
     a >2^53 value as a string to avoid float64 loss.
     """
@@ -153,9 +153,9 @@ class Account(BaseModel):
     account_id: str
     username: str
     created_at: str
-    # Integer balance in 10^-18 token units (ERC20-style minor units).
+    # Integer balance in 10^-12 token units (ERC20-style minor units).
     # Transported as a JSON string so clients (and float64) never lose
-    # precision once the value exceeds 2^53 (~0.009 tokens).
+    # precision once the value exceeds 2^53 (~9 tokens).
     balance: int = 0
 
     @field_serializer("balance")
@@ -182,7 +182,7 @@ class AdminAccount(BaseModel):
     effective_can_work: bool
     effective_can_use: bool
     created_at: str
-    # Integer balance in 10^-18 token units (serialized as a string).
+    # Integer balance in 10^-12 token units (serialized as a string).
     balance: int = 0
 
     @field_serializer("balance")
@@ -222,7 +222,7 @@ class AdminBalanceEvent(BalanceEvent):
 
 
 class AccountBalance(BaseModel):
-    """A user's own balance (10^-18 token units, serialized as a string)."""
+    """A user's own balance (10^-12 token units, serialized as a string)."""
 
     account_id: str
     balance: int
@@ -451,7 +451,7 @@ class AccountRecord:
     can_work: bool = False
     can_use: bool = True
     banned: bool = False
-    # Account balance in 10^-18 token units (ERC20-style minor units).
+    # Account balance in 10^-12 token units (ERC20-style minor units).
     # Exact integer arithmetic only — no floats. Defaults to 0 for fresh and
     # migrated accounts alike.
     balance: int = 0

@@ -175,7 +175,7 @@ paths:
                   banned: { type: boolean }
                   balance:
                     type: string
-                    description: Account balance in 10^-18 token units (decimal string).
+                    description: Account balance in 10^-12 token units (decimal string).
                   workers:
                     type: array
                     items:
@@ -231,7 +231,7 @@ paths:
       summary: Return the account's own balance.
       description: >
         Auth: user-scoped API key OR the account session token. The balance is
-        an integer in 10^-18 token units, serialized as a decimal string.
+        an integer in 10^-12 token units, serialized as a decimal string.
       security:
         - sessionAuth: []
         - userKeyAuth: []
@@ -366,7 +366,7 @@ paths:
       operationId: setBalance
       summary: Set an account's balance to an exact value (admin only).
       description: >
-        The balance is an integer in 10^-18 token units; it may be sent as a
+        The balance is an integer in 10^-12 token units; it may be sent as a
         JSON number or a decimal string (for values above 2^53).
       security:
         - sessionAuth: []
@@ -1078,7 +1078,7 @@ components:
           format: date-time
         balance:
           type: string
-          description: Account balance in 10^-18 token units (decimal string).
+          description: Account balance in 10^-12 token units (decimal string).
 
     AccountBalance:
       type: object
@@ -1087,7 +1087,7 @@ components:
         account_id: { type: string }
         balance:
           type: string
-          description: Account balance in 10^-18 token units (decimal string).
+          description: Account balance in 10^-12 token units (decimal string).
 
     SetBalanceRequest:
       type: object
@@ -1095,7 +1095,7 @@ components:
       properties:
         balance:
           description: >
-            Exact balance in 10^-18 token units. Accepts a JSON integer or a
+            Exact balance in 10^-12 token units. Accepts a JSON integer or a
             decimal string (for values above 2^53).
           type: string
         reason:
@@ -1108,7 +1108,7 @@ components:
       properties:
         delta:
           description: >
-            Signed change in 10^-18 token units (negative = deduction). Accepts
+            Signed change in 10^-12 token units (negative = deduction). Accepts
             a JSON integer or a decimal string (for values above 2^53).
           type: string
         reason:
@@ -1125,7 +1125,7 @@ components:
           enum: [set, adjust]
         delta:
           type: string
-          description: Signed change in 10^-18 token units (decimal string).
+          description: Signed change in 10^-12 token units (decimal string).
         balance_after:
           type: string
           description: Resulting balance (decimal string).
@@ -1166,7 +1166,7 @@ components:
           format: date-time
         balance:
           type: string
-          description: Account balance in 10^-18 token units (decimal string).
+          description: Account balance in 10^-12 token units (decimal string).
 
     PermissionState:
       type: object

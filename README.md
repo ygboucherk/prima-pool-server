@@ -97,15 +97,15 @@ Self-demotion is allowed as long as another admin remains.
 
 ## Balances
 
-Each account carries an integer **balance**, in units of **10⁻¹⁸ token**
+Each account carries an integer **balance**, in units of **10⁻¹² token**
 (ERC20-style minor units — the same idea as a token's `decimals`). So a balance
-of `1500000000000000000` means `1.5` tokens.
+of `1500000000000` means `1.5` tokens.
 
 - Stored as an exact `INTEGER` in the DB (`accounts.balance_minor`); all
   arithmetic is integer (`+`/`-`), never float.
-- **Serialized as a decimal string** on the wire (e.g. `"1500000000000000000"`)
+- **Serialized as a decimal string** on the wire (e.g. `"1500000000000"`)
   so clients never lose precision — a JSON `number` is float64 and cannot
-  represent values above 2⁵³ exactly (~0.009 tokens). The dashboard uses
+  represent values above 2⁵³ exactly (~9 tokens). The dashboard uses
   `BigInt` string math for the same reason.
 - Admins can **set** (`PUT .../balance`) or **adjust** (`POST .../balance/adjust`
   with a signed `delta`, no sign restriction — balances may go negative).
@@ -127,7 +127,7 @@ attribution) and the pricing tiers (token·layer vs per-token, per-model rates)
 remain future work — see `docs/protocol/billing-balances.md`.
 
 > **Known limit:** `balance_minor` is a SQLite `INTEGER` (64-bit signed), so a
-> single balance is capped at 2⁶³⁻¹ minor units ≈ **9.2 tokens**. Requests
+> single balance is capped at 2⁶³⁻¹ minor units ≈ **9.2M tokens**. Requests
 > outside that range are rejected with 422. When real billing lands, the escape
 > hatch is re-denominating (e.g. to 10⁻²⁴ units) or moving to a `TEXT`/decimal
 > column.

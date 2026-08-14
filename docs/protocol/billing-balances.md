@@ -10,11 +10,11 @@ follow-ups this design anticipates.
 
 ## 1. Unit
 
-A balance is a plain **integer**, in units of **10⁻¹⁸ token** — the ERC20
-"minor units" pattern (a token's `decimals()` = 18).
+A balance is a plain **integer**, in units of **10⁻¹² token** — the ERC20
+"minor units" pattern (a token's `decimals()` = 12).
 
-- `balance_minor` is the exact value: `balance_minor = tokens × 10¹⁸`.
-- A balance of `1500000000000000000` means `1.5` tokens.
+- `balance_minor` is the exact value: `balance_minor = tokens × 10¹²`.
+- A balance of `1500000000000` means `1.5` tokens.
 
 Why integer minor units rather than a float or a decimal column:
 
@@ -29,11 +29,11 @@ Why integer minor units rather than a float or a decimal column:
 
 ### The wire format is a decimal string
 
-`balance` is serialized as a **JSON string** (`"1500000000000000000"`), not a
+`balance` is serialized as a **JSON string** (`"1500000000000"`), not a
 JSON number. JSON numbers are float64, which can only represent integers
-exactly up to 2⁵³ ≈ 9.007×10¹⁵ — above that (≈ 0.009 tokens) a balance would
+exactly up to 2⁵³ ≈ 9.007×10¹⁵ — above that (≈ 9 tokens) a balance would
 silently round. The dashboard likewise does `BigInt` string math for
-formatting and input parsing; never `parseFloat(x) * 1e18`.
+formatting and input parsing; never `parseFloat(x) * 1e12`.
 
 Request fields (`SetBalanceRequest.balance`, `AdjustBalanceRequest.delta`)
 accept **either** a JSON integer **or** a numeric string (Pydantic coerces), so
@@ -42,7 +42,7 @@ a client can send a large value as a string without loss.
 ### 64-bit ceiling
 
 `balance_minor` is a SQLite `INTEGER` (64-bit signed), so a single balance is
-capped at 2⁶³⁻¹ minor units ≈ **9.2 tokens**. Requests outside that range are
+capped at 2⁶³⁻¹ minor units ≈ **9.2M tokens**. Requests outside that range are
 rejected with 422 (the request models bound the field to `[-(2⁶³), 2⁶³⁻¹]` to
 avoid an `OverflowError`/500).
 

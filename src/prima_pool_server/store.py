@@ -543,7 +543,7 @@ class Store:
                 "CHECK (banned IN (0, 1))"
             )
             logger.info("migrated accounts: added column banned")
-        # v0.8: accounts gain a balance (integer, 10^-18 token units). Existing
+        # v0.8: accounts gain a balance (integer, 10^-12 token units). Existing
         # rows backfill to 0 (an empty balance) via the ALTER's NOT NULL
         # DEFAULT — no explicit UPDATE needed, and idempotent (the guard checks
         # for the column that only post-v0.8 accounts have).

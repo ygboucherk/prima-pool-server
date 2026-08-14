@@ -491,10 +491,10 @@
   }
 
   // ── account tab ──────────────────────────────────────────────────────
-  // Balances are exact integers in 10^-18 token units (ERC20-style minor
+  // Balances are exact integers in 10^-12 token units (ERC20-style minor
   // units). The API transports them as decimal strings to avoid float64 loss,
   // so we format with BigInt string math, never Number.
-  const BALANCE_DECIMALS = 18n;
+  const BALANCE_DECIMALS = 12n;
 
   function formatBalance(minorStr) {
     try {
@@ -503,7 +503,7 @@
       const abs = v < 0n ? -v : v;
       const whole = abs / (10n ** BALANCE_DECIMALS);
       const frac = abs % (10n ** BALANCE_DECIMALS);
-      let fracStr = frac.toString().padStart(18, '0').replace(/0+$/, '');
+      let fracStr = frac.toString().padStart(12, '0').replace(/0+$/, '');
       return sign + whole.toString() + (fracStr ? '.' + fracStr : '');
     } catch (e) {
       return minorStr;
@@ -511,7 +511,7 @@
   }
 
   // Parse a decimal token amount ("1.5" or "1.500") into exact minor units.
-  // Rejects >18 decimal places and non-numeric input.
+  // Rejects >12 decimal places and non-numeric input.
   function parseTokensToMinor(text) {
     const s = String(text).trim();
     if (!s) return null;
@@ -520,8 +520,8 @@
     const sign = m[1] === '-' ? -1n : 1n;
     const whole = m[2] || '0';
     let frac = m[3] || '';
-    if (frac.length > 18) return null;
-    frac = frac.padEnd(18, '0');
+    if (frac.length > 12) return null;
+    frac = frac.padEnd(12, '0');
     return sign * (BigInt(whole) * (10n ** BALANCE_DECIMALS) + BigInt(frac || '0'));
   }
 
@@ -684,7 +684,7 @@
   async function adjustBalance(targetId, raw) {
     const minor = parseTokensToMinor(raw);
     if (minor === null) {
-      setAdminBalanceMessage('Invalid amount — enter e.g. "1.5" or "-0.25" (up to 18 decimals).', 'err');
+      setAdminBalanceMessage('Invalid amount — enter e.g. "1.5" or "-0.25" (up to 12 decimals).', 'err');
       return;
     }
     try {
