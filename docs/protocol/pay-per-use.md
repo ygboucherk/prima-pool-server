@@ -219,6 +219,16 @@ These are accepted-by-decision, and each must be stated in the final docs:
   CASCADE`, so revoking a user key deletes that key's request/cost history (the
   settlement `balance_events` survive — no FK). Pre-existing behavior that is
   now about money, not just tokens; a soft-delete is a future fix.
+- **Revoked worker mid-settlement → its credit is dropped.** Settlement maps
+  each cluster member to its owning account by reading the `workers` table at
+  settlement time. If a worker was revoked (deleted) between cluster formation
+  and the request completing, `get_worker` returns `None`, that member's credit
+  is silently skipped, and the requester still pays the full cost — the pool
+  absorbs the difference. Niche (a worker must be revoked in the same window as
+  an in-flight request, and settlement is immediate at end-of-stream), and
+  consistent with "deleting a worker erases its worker-attributed history"
+  (usage-and-accounting.md §0.1). Not a crash — the atomic transaction still
+  commits the requester debit and any other workers' credits.
 - **Cosmetic rounding.** The dashboard's float `share × cost` may differ from
   the settled integer credit by < 1 minor unit. Cosmetic only.
 

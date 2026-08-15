@@ -147,6 +147,14 @@ def _parse_models() -> dict[str, ModelDef]:
             output_price = int(parts[4]) if len(parts) > 4 else 0
         except ValueError:
             output_price = 0
+        # Negative prices would flip settlement: a negative cost turns the
+        # requester's "debit" into a balance *increase* (money minting) and
+        # skips worker credits. Clip to 0 (free) rather than reject — a bad
+        # operator config must never create value out of thin air.
+        if input_price < 0:
+            input_price = 0
+        if output_price < 0:
+            output_price = 0
         result[name] = ModelDef(
             slug=name,
             gguf_sha256=gguf_sha256,

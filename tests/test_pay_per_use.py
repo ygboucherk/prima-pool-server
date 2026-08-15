@@ -45,6 +45,15 @@ def test_parse_models_invalid_price_defaults_zero(monkeypatch):
     assert models["a"].output_price == 0
 
 
+def test_parse_models_negative_price_clips_to_zero(monkeypatch):
+    """A negative price must clip to 0 — a negative cost would flip the debit
+    into a balance *increase* (money minting) during settlement."""
+    monkeypatch.setenv("PRIMA_POOL_MODELS", "a:<hash>:4096:-1000:-3000")
+    models = _parse_models()
+    assert models["a"].input_price == 0
+    assert models["a"].output_price == 0
+
+
 def _priced_settings() -> Settings:
     return Settings(
         models={
@@ -161,7 +170,8 @@ def test_settle_request_unknown_distribution_equal_split(tmp_path):
 
 
 def test_settle_request_zero_cost_no_balance_change(tmp_path):
-    """A free request (cost 0) records the request but moves no balance."""
+    """A free request (cost 0) records the request but moves no balance and
+    writes no balance events (no zero-delta debit/credit noise)."""
     s, alice, bob, alice_key, wrk_a, wrk_b = _settle_fixture(tmp_path)
     s.settle_request(
         RequestRecord(
@@ -181,6 +191,9 @@ def test_settle_request_zero_cost_no_balance_change(tmp_path):
     assert s.get_balance(alice.account_id) == 0
     assert s.get_balance(bob.account_id) == 0
     assert len(s.list_requests_for_account(alice.account_id)) == 1
+    # No debit/credit events for a zero-cost request.
+    assert s.list_balance_events(alice.account_id) == []
+    assert s.list_balance_events(bob.account_id) == []
 
 
 def test_settle_request_records_frozen_costs(tmp_path):

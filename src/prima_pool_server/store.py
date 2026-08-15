@@ -1143,6 +1143,8 @@ class Store:
           1. INSERT the request row (with frozen costs).
           2. Debit the requesting account by `input_cost_minor +
              output_cost_minor` (a `debit` balance event, reason = request_id).
+             Skipped when the cost is 0 (a zero-delta debit is audit noise; the
+             request row is still recorded).
           3. Credit each participating worker's account by its weighted share
              (a `credit` balance event each).
 
@@ -1189,10 +1191,13 @@ class Store:
                     ),
                 )
 
-                # Debit the requester.
-                self._apply_balance_delta(
-                    self._conn, rec.account_id, -cost, kind="debit", reason=rec.request_id
-                )
+                # Debit the requester. Skipped for zero-cost requests (free
+                # models) — a zero-delta "debit" event is audit-trail noise;
+                # the request row itself is still recorded above.
+                if cost != 0:
+                    self._apply_balance_delta(
+                        self._conn, rec.account_id, -cost, kind="debit", reason=rec.request_id
+                    )
 
                 # Credit the workers (weighted by layer share).
                 if cost > 0:
