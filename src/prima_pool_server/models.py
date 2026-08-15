@@ -193,9 +193,11 @@ class AdminAccount(BaseModel):
 class BalanceEvent(BaseModel):
     """One balance-mutation event, visible to the account owner.
 
-    `kind` is "set" (balance set to an absolute value) or "adjust" (balance
-    changed by a signed delta). `delta` is the signed change; `balance_after`
-    is the resulting balance. `reason` is an optional operator memo.
+    `kind` is "set" (balance set to an absolute value), "adjust" (balance
+    changed by a signed delta), "debit" (charged for inference), or "credit"
+    (earned from serving work). `delta` is the signed change; `balance_after`
+    is the resulting balance. `reason` is an optional memo (for settlement,
+    the request_id).
     """
 
     event_id: str
@@ -284,12 +286,18 @@ class WorkerState(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    """A model the pool serves, keyed by (slug, gguf_sha256)."""
+    """A model the pool serves, keyed by (slug, gguf_sha256).
+
+    `input_price`/`output_price` are per-token rates in balance-minor units
+    (10^-12 token per token); both 0 means the model is free.
+    """
 
     slug: str
     gguf_sha256: str
     required_memory_mb: int
     live: bool  # whether at least one live cluster currently serves it
+    input_price: int = 0
+    output_price: int = 0
 
 
 class InterfaceConfig(BaseModel):
@@ -379,13 +387,20 @@ class ClusterInfo(BaseModel):
 
 
 class RequestLogEntry(BaseModel):
-    """A single logged inference request (user-facing view)."""
+    """A single logged inference request (user-facing view).
+
+    `input_cost_minor`/`output_cost_minor` are the frozen per-request costs in
+    balance-minor units (10^-12 token), computed from the model's prices at
+    record time. Legacy requests default to 0.
+    """
 
     request_id: str
     model: str
     cluster_id: str
     prompt_tokens: int
     completion_tokens: int
+    input_cost_minor: int = 0
+    output_cost_minor: int = 0
     created_at: float
 
 
@@ -399,6 +414,8 @@ class ModelUsage(BaseModel):
     requests: int
     prompt_tokens: int
     completion_tokens: int
+    input_cost_minor: int = 0
+    output_cost_minor: int = 0
 
 
 class WorkerLogEntry(BaseModel):
@@ -410,6 +427,11 @@ class WorkerLogEntry(BaseModel):
     `share`/`effective_*` are None when the cluster's layer distribution is
     unknown (or this worker's window is missing from the report). A forwarder
     (layer_window 0) has share 0.0 and effective 0.0.
+
+    `input_cost_minor`/`output_cost_minor` are the request's frozen costs
+    (balance-minor units). `effective_cost_minor` is that cost scaled by the
+    worker's share (the worker's settled earning for this request, except for
+    the integer-division rounding; see pay-per-use.md).
     """
 
     request_id: str
@@ -421,6 +443,9 @@ class WorkerLogEntry(BaseModel):
     share: float | None
     effective_prompt: float | None
     effective_completion: float | None
+    input_cost_minor: int = 0
+    output_cost_minor: int = 0
+    effective_cost_minor: float | None = None
     created_at: float
 
 
@@ -547,6 +572,9 @@ class RequestRecord:
     Captured by the proxy in `chat_completions`. Token counts come from the
     upstream llama-server `usage` object; for streaming requests they are
     parsed from the final SSE chunk before `data: [DONE]`.
+
+    `input_cost_minor`/`output_cost_minor` are the frozen per-request costs in
+    balance-minor units, computed from the model's prices at record time.
     """
 
     request_id: str
@@ -556,6 +584,8 @@ class RequestRecord:
     cluster_id: str
     prompt_tokens: int
     completion_tokens: int
+    input_cost_minor: int = 0
+    output_cost_minor: int = 0
     created_at: float = field(default_factory=time.time)
 
 

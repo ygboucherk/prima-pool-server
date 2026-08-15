@@ -119,12 +119,10 @@ of `1500000000000` means `1.5` tokens.
   future account deletion (mirrors `requests.cluster_id` /
   `cluster_members.worker_id`).
 
-Nothing consumes the balance yet: inference does **not** deduct from it, and
-worker-side crediting does **not** accrue to it. This is the storage + admin
-control + visibility layer only. The debit-on-use path (per-request deduction,
-streaming token counts known only at stream end, multi-account cluster
-attribution) and the pricing tiers (token·layer vs per-token, per-model rates)
-remain future work — see `docs/protocol/billing-balances.md`.
+Balances are now consumed by pay-per-use inference (see
+[Pay-per-use](#pay-per-use) below). The full design decisions are recorded in
+`docs/protocol/billing-balances.md` (unit + storage) and
+`docs/protocol/pay-per-use.md` (debit/credit settlement).
 
 > **Known limit:** `balance_minor` is a SQLite `INTEGER` (64-bit signed), so a
 > single balance is capped at 2⁶³⁻¹ minor units ≈ **9.2M tokens**. Requests
@@ -203,6 +201,44 @@ curl http://<server>:8000/v1/chat/completions \
 
 Streaming (`"stream": true`, SSE) is supported. Requires `NET_ADMIN` +
 `/dev/net/tun` on the server (already in `docker-compose.yml`).
+
+## Pay-per-use
+
+Models can be priced. Each model carries an **input price** (per prompt token)
+and an **output price** (per completion token), both in balance-minor units
+(10⁻¹² token), set via the registry:
+
+```
+PRIMA_POOL_MODELS="demo-model:<sha256>:4096:1000000:3000000"
+```
+
+Here `demo-model` costs `1000000` minor units (0.000001 token) per prompt
+token and `3000000` (0.000003 token) per completion token. Legacy 3-field
+entries default both prices to 0 (free).
+
+- **Debit**: the requesting account's balance is debited
+  `input_price × prompt_tokens + output_price × completion_tokens` at the end
+  of the request (exact integer arithmetic). The cost is frozen into the
+  request record so history survives later price changes.
+- **Credit**: each cluster member's owning account is credited its weighted
+  share (`layer_window / total layers`) of that cost, computed with integer
+  division so the credits sum exactly to the debit (rounding remainder goes to
+  the head). Unknown distribution → equal split. This is the same
+  "whatever counts in the history" weight the worker dashboard shows.
+- **Gate**: priced models require a **positive** balance; a `<= 0` balance
+  gets `402 Payment Required` (`insufficient_balance`). Free models are always
+  allowed. The gate is at request start, so a request may still drive a balance
+  negative (the pool absorbs it; the account is blocked until it refills).
+- **Prices are public** on `GET /v1/models` (`input_price`/`output_price`).
+
+`GET /v1/models` returns the prices; usage logs/stats carry the frozen
+`input_cost_minor`/`output_cost_minor`; worker logs/stats carry the
+`effective_cost_minor` (the worker's approximate earning). Balance events now
+include `debit` and `credit` kinds with `reason = request_id`.
+
+The full design (zero margin, trust-on-head, allow-into-debt, mid-request
+dissolve, per-quantization pricing) is recorded in
+`docs/protocol/pay-per-use.md`.
 
 ## Usage & accounting
 
@@ -290,7 +326,7 @@ All settings are read from `PRIMA_POOL_*` environment variables. See
 | `PRIMA_POOL_PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Base URL advertised in config URLs |
 | `PRIMA_POOL_SESSION_SECRET` | dev value | HMAC secret for session tokens (**change in prod**) |
 | `PRIMA_POOL_SESSION_TTL_S` | `3600` | Session token lifetime (seconds) |
-| `PRIMA_POOL_MODELS` | `demo-model:<no-hash>:4096` | Model registry `name:gguf_sha256:required_memory_mb[,..]` |
+| `PRIMA_POOL_MODELS` | `demo-model:<no-hash>:4096` | Model registry `name:gguf_sha256:required_memory_mb[:input_price:output_price][,..]` |
 | `PRIMA_POOL_HEARTBEAT_TIMEOUT_S` | `30` | Missed-heartbeat offline threshold |
 | `PRIMA_POOL_HEARTBEAT_INTERVAL_S` | `10` | Suggested heartbeat cadence |
 | `PRIMA_POOL_ASSIGNABLE_GRACE_S` | `5` | Grace period before a re-added worker is assignable |

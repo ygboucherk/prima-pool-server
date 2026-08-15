@@ -256,18 +256,20 @@
     const tbody = $('usage-body');
     tbody.innerHTML = '';
     if (!logs.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty">No requests yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No requests yet</td></tr>';
       return;
     }
     for (const log of logs) {
       const tr = document.createElement('tr');
       const when = new Date(log.created_at * 1000).toLocaleString();
+      const cost = formatBalance(String(log.input_cost_minor + log.output_cost_minor));
       tr.innerHTML = `
         <td>${when}</td>
         <td>${log.model}</td>
         <td><code class="cluster-link" data-cluster="${log.cluster_id}">${log.cluster_id}</code></td>
         <td>${log.prompt_tokens}</td>
-        <td>${log.completion_tokens}</td>`;
+        <td>${log.completion_tokens}</td>
+        <td>${cost}</td>`;
       tr.querySelector('.cluster-link').addEventListener('click', () => openCluster(log.cluster_id));
       tbody.appendChild(tr);
     }
@@ -294,7 +296,7 @@
     const tbody = $('worker-logs-body');
     tbody.innerHTML = '';
     if (!logs.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No inference yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No inference yet</td></tr>';
       return;
     }
     for (const log of logs) {
@@ -304,13 +306,16 @@
         ? '—' : log.effective_prompt.toFixed(1);
       const effC = (log.effective_completion === null || log.effective_completion === undefined)
         ? '—' : log.effective_completion.toFixed(1);
+      const effCost = (log.effective_cost_minor === null || log.effective_cost_minor === undefined)
+        ? '—' : formatBalance(String(Math.round(log.effective_cost_minor)));
       tr.innerHTML = `
         <td>${when}</td>
         <td>${log.model}</td>
         <td><code>${log.worker_id}</code></td>
         <td><code class="cluster-link" data-cluster="${log.cluster_id}">${log.cluster_id}</code></td>
         <td>${effP}</td>
-        <td>${effC}</td>`;
+        <td>${effC}</td>
+        <td>${effCost}</td>`;
       const link = tr.querySelector('.cluster-link');
       if (link) link.addEventListener('click', () => openCluster(log.cluster_id));
       tbody.appendChild(tr);

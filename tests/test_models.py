@@ -67,6 +67,8 @@ def test_models_endpoint_unauthenticated(client: TestClient):
     assert body[0]["gguf_sha256"] == HASH_A
     assert body[0]["required_memory_mb"] == 4096
     assert body[0]["live"] is False
+    assert body[0]["input_price"] == 0
+    assert body[0]["output_price"] == 0
 
 
 def test_models_endpoint_live_flag(client: TestClient):

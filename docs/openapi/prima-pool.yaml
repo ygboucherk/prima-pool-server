@@ -710,6 +710,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
         "502":
           description: Upstream cluster head unreachable.
 
@@ -1039,6 +1041,12 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
+    PaymentRequired:
+      description: Insufficient balance for a priced model.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     Conflict:
       description: State conflict (e.g. username taken).
       content:
@@ -1264,12 +1272,20 @@ components:
 
     ModelInfo:
       type: object
-      required: [slug, gguf_sha256, required_memory_mb, live]
+      required: [slug, gguf_sha256, required_memory_mb, live, input_price, output_price]
       properties:
         slug: { type: string }
         gguf_sha256: { type: string, minLength: 64, maxLength: 64 }
         required_memory_mb: { type: integer }
         live: { type: boolean, description: A live cluster currently serves this model }
+        input_price:
+          type: integer
+          description: >
+            Per-prompt-token price in balance-minor units (10^-12 token). 0 = free.
+        output_price:
+          type: integer
+          description: >
+            Per-completion-token price in balance-minor units (10^-12 token). 0 = free.
 
     EndpointInfo:
       type: object
@@ -1500,6 +1516,12 @@ components:
         cluster_id: { type: string }
         prompt_tokens: { type: integer }
         completion_tokens: { type: integer }
+        input_cost_minor:
+          type: integer
+          description: Frozen per-request prompt cost in balance-minor units (10^-12 token).
+        output_cost_minor:
+          type: integer
+          description: Frozen per-request completion cost in balance-minor units (10^-12 token).
         created_at: { type: number, description: Unix timestamp (seconds) }
 
     UsageStatsRequest:
@@ -1522,6 +1544,12 @@ components:
         requests: { type: integer }
         prompt_tokens: { type: integer }
         completion_tokens: { type: integer }
+        input_cost_minor:
+          type: integer
+          description: Summed frozen prompt cost in balance-minor units.
+        output_cost_minor:
+          type: integer
+          description: Summed frozen completion cost in balance-minor units.
 
     WorkerLogEntry:
       type: object
@@ -1548,6 +1576,19 @@ components:
           type: number
           nullable: true
           description: completion_tokens * share (null when share is null).
+        input_cost_minor:
+          type: integer
+          description: Frozen per-request prompt cost (balance-minor units).
+        output_cost_minor:
+          type: integer
+          description: Frozen per-request completion cost (balance-minor units).
+        effective_cost_minor:
+          type: number
+          nullable: true
+          description: >
+            (input_cost_minor + output_cost_minor) * share — the worker's
+            approximate earning (the settled integer credit may differ by <1
+            minor unit from integer-division rounding).
         created_at: { type: number, description: Unix timestamp (seconds) }
 
     WorkerStatsRequest:
@@ -1586,3 +1627,8 @@ components:
           maxItems: 2
           items: { type: number }
           description: "[prompt, completion] share-scaled, summed over the account's worker rows."
+        effective_cost_minor:
+          type: number
+          description: >
+            Share-scaled frozen cost summed over the account's worker rows
+            (the workers' approximate total earning for this model).

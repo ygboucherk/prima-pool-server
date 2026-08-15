@@ -19,6 +19,7 @@ from .errors import (
     ConflictError,
     ForbiddenError,
     NotFoundError,
+    PaymentRequiredError,
     ProblemError,
     UnauthorizedError,
     problem_exception_handler,
@@ -81,17 +82,25 @@ def _attribution_entry(row: dict) -> WorkerLogEntry:
     share = layer_window / cluster_total (over ALL cluster members).
     None when the distribution is unknown (no window / no total).
     Forwarders (layer_window 0) get share 0.0 and effective 0.0.
+
+    effective_cost_minor = (input_cost + output_cost) * share — the worker's
+    approximate earning, computed from the frozen request cost (the settled
+    integer credit may differ by <1 minor unit from integer-division rounding).
     """
     lw = row["layer_window"]
     total = row["cluster_total"]
+    input_cost = row["input_cost_minor"]
+    output_cost = row["output_cost_minor"]
     if lw is not None and total:
         share = lw / total
         effective_prompt = row["prompt_tokens"] * share
         effective_completion = row["completion_tokens"] * share
+        effective_cost = (input_cost + output_cost) * share
     else:
         share = None
         effective_prompt = None
         effective_completion = None
+        effective_cost = None
     return WorkerLogEntry(
         request_id=row["request_id"],
         worker_id=row["worker_id"],
@@ -102,6 +111,9 @@ def _attribution_entry(row: dict) -> WorkerLogEntry:
         share=share,
         effective_prompt=effective_prompt,
         effective_completion=effective_completion,
+        input_cost_minor=input_cost,
+        output_cost_minor=output_cost,
+        effective_cost_minor=effective_cost,
         created_at=row["created_at"],
     )
 
@@ -944,6 +956,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 gguf_sha256=md.gguf_sha256,
                 required_memory_mb=md.required_memory_mb,
                 live=md.slug in live_models,
+                input_price=md.input_price,
+                output_price=md.output_price,
             )
             for md in settings.models.values()
         ]
@@ -1016,6 +1030,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if not model:
             raise BadRequestError("Missing 'model' in request body.")
 
+        model_def = settings.models.get(model)
+        input_price = model_def.input_price if model_def else 0
+        output_price = model_def.output_price if model_def else 0
+
+        # Insufficient-balance gate: priced models require a positive balance.
+        # Free models (both prices 0) are always allowed. This is a
+        # start-of-request check; a request that passes may still drive the
+        # balance negative (accepted — see docs/protocol/pay-per-use.md §10).
+        if input_price or output_price:
+            balance = store.get_balance(account_id)
+            if balance is None or balance <= 0:
+                raise PaymentRequiredError(
+                    "Insufficient balance for this model. Top up your balance to use priced models."
+                )
+
         cluster = router.find_live_cluster(model)
         if cluster is None:
             raise NotFoundError(f"No live cluster available for model '{model}'.")
@@ -1029,10 +1058,22 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         stream = bool(body.get("stream", False))
         request_id = new_id("req")
 
-        def _log_usage(prompt_tokens: int, completion_tokens: int) -> None:
-            """Persist a request record for accounting (best-effort)."""
+        def _settle_usage(prompt_tokens: int, completion_tokens: int) -> None:
+            """Record the request and settle debit + worker credits (atomic).
+
+            Best-effort: a settlement failure must never break inference.
+            """
             try:
-                store.record_request(
+                input_cost = input_price * prompt_tokens
+                output_cost = output_price * completion_tokens
+                # Map each cluster member to its owning account so the credit
+                # lands on the right account (clusters are multi-account).
+                worker_account_ids = {}
+                for wid in cluster.members:
+                    w = store.get_worker(wid)
+                    if w is not None:
+                        worker_account_ids[wid] = w.account_id
+                store.settle_request(
                     RequestRecord(
                         request_id=request_id,
                         account_id=account_id,
@@ -1041,10 +1082,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                         cluster_id=cluster.cluster_id,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
-                    )
+                        input_cost_minor=input_cost,
+                        output_cost_minor=output_cost,
+                    ),
+                    worker_account_ids=worker_account_ids,
+                    layer_windows=cluster.layer_windows,
                 )
             except Exception:  # noqa: BLE001 - accounting must never break inference
-                logger.exception("failed to record usage for request %s", request_id)
+                logger.exception("failed to settle usage for request %s", request_id)
 
         try:
             if stream:
@@ -1080,22 +1125,22 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                                 # client got everything llama-server produced.
                                 logger.warning("upstream stream ended prematurely: %s", target)
                             finally:
-                                # Only record usage if the upstream actually
-                                # sent a `usage` chunk. If it closed before
-                                # that (abrupt close), there's no token count
-                                # to log — recording (0,0) would be a false
+                                # Only settle if the upstream actually sent a
+                                # `usage` chunk. If it closed before that
+                                # (abrupt close), there's no token count to
+                                # bill — settling (0,0) would be a false
                                 # "zero-token request" entry.
                                 parsed = _parse_sse_usage(bytes(buffer))
                                 if parsed is not None:
                                     prompt_tokens, completion_tokens = parsed
-                                    _log_usage(prompt_tokens, completion_tokens)
+                                    _settle_usage(prompt_tokens, completion_tokens)
 
                 return StreamingResponse(proxy_stream(), media_type="text/event-stream")
             async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
                 resp = await client.post(target, json=body)
                 data = resp.json()
                 usage = data.get("usage") or {}
-                _log_usage(
+                _settle_usage(
                     int(usage.get("prompt_tokens", 0)),
                     int(usage.get("completion_tokens", 0)),
                 )
@@ -1154,6 +1199,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 cluster_id=r.cluster_id,
                 prompt_tokens=r.prompt_tokens,
                 completion_tokens=r.completion_tokens,
+                input_cost_minor=r.input_cost_minor,
+                output_cost_minor=r.output_cost_minor,
                 created_at=r.created_at,
             )
             for r in store.list_requests_in_range(account_id, begin, end, limit=limit)
@@ -1181,6 +1228,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 cluster_id=r.cluster_id,
                 prompt_tokens=r.prompt_tokens,
                 completion_tokens=r.completion_tokens,
+                input_cost_minor=r.input_cost_minor,
+                output_cost_minor=r.output_cost_minor,
                 created_at=r.created_at,
             )
             for r in store.list_requests_for_account(account_id, limit=limit)
@@ -1210,8 +1259,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                         "requests": reqs,
                         "prompt_tokens": prompt,
                         "completion_tokens": completion,
+                        "input_cost_minor": input_cost,
+                        "output_cost_minor": output_cost,
                     }
-                    for model, (reqs, prompt, completion) in stats.items()
+                    for model, (reqs, prompt, completion, input_cost, output_cost) in stats.items()
                 }
             )
         return result
@@ -1286,7 +1337,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             for r in rows:
                 entry = per_model.setdefault(
                     r["model"],
-                    {"total_tokens": [0.0, 0.0], "effective_tokens": [0.0, 0.0]},
+                    {
+                        "total_tokens": [0.0, 0.0],
+                        "effective_tokens": [0.0, 0.0],
+                        "effective_cost_minor": 0.0,
+                    },
                 )
                 entry["total_tokens"][0] += r["prompt_tokens"]
                 entry["total_tokens"][1] += r["completion_tokens"]
@@ -1296,6 +1351,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                     share = lw / total
                     entry["effective_tokens"][0] += r["prompt_tokens"] * share
                     entry["effective_tokens"][1] += r["completion_tokens"] * share
+                    entry["effective_cost_minor"] += (
+                        (r["input_cost_minor"] + r["output_cost_minor"]) * share
+                    )
             result.append(per_model)
         return result
 

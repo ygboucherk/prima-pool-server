@@ -1,12 +1,11 @@
 # Billing balances
 
-Status: **implemented (storage + admin control + visibility only)**.
+Status: **implemented**.
 
 This document records the design decisions behind the per-account balance
 system, so a future contributor doesn't misread the unit or the rationale.
-The implemented scope is the *state + controls* layer. Nothing yet debits a
-balance on inference or credits a balance for serving work — those are the
-follow-ups this design anticipates.
+The *state + controls* layer is implemented here; the debit/credit settlement
+that consumes balances is implemented in [`pay-per-use.md`](pay-per-use.md).
 
 ## 1. Unit
 
@@ -114,20 +113,9 @@ Design points:
 
 ## 4. Open questions (future work)
 
-These are the deliberate follow-ups the current layer is designed to serve:
+The debit/credit settlement these follow-ups anticipated is now implemented —
+see [`pay-per-use.md`](pay-per-use.md). The remaining follow-ups:
 
-- **Debit-on-use.** A per-request deduction would need to happen when token
-  counts are known — for streaming, only at the end of the SSE stream. It must
-  also handle multi-account clusters (attribute the request across accounts
-  consistently with the worker-attribution logic in
-  `usage-and-accounting.md` §0.1) and decide what happens when a balance goes
-  negative (block vs. allow into debt).
-- **Worker crediting.** Credits for serving work (purpose (c)) need the
-  token·layer → token conversion decided (see `usage-and-accounting.md` §1)
-  and a base rate per model tier.
-
-> The full design for both is now recorded in
-> [`pay-per-use.md`](pay-per-use.md) (design only — not yet implemented).
 - **Reason/audit semantics.** Whether the owner's event view should expose the
   acting admin's identity for transparency (currently admin-only).
 - **Redenomination vs. TEXT**, when balances approach the 64-bit ceiling.

@@ -69,6 +69,16 @@ class BadRequestError(ProblemError):
         )
 
 
+class PaymentRequiredError(ProblemError):
+    def __init__(self, detail: str = "Insufficient balance for this model.") -> None:
+        super().__init__(
+            402,
+            "https://prima-pool.dev/errors/insufficient_balance",
+            "Payment Required",
+            detail,
+        )
+
+
 class TooManyRequestsError(ProblemError):
     def __init__(self, detail: str = "Rate limited.") -> None:
         super().__init__(

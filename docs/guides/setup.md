@@ -144,7 +144,9 @@ PRIMA_POOL_PUBLIC_BASE_URL=https://pool.example.com
 # ⚠️ Strong random secret for session tokens
 PRIMA_POOL_SESSION_SECRET=$(openssl rand -hex 32)
 
-# Model registry: name:gguf_sha256:required_memory_mb
+# Model registry: name:gguf_sha256:required_memory_mb[:input_price:output_price]
+# input_price/output_price = per-token rates in balance-minor units (10^-12 token);
+# omit them (or set 0) for free models.
 PRIMA_POOL_MODELS=deepseek-v4-flash-0731:3f9c2a5e...:16384
 ```
 

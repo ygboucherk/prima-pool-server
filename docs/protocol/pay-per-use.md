@@ -1,12 +1,11 @@
 # Pay-per-use (usage debit + worker crediting)
 
-Status: **design only** (brainstorming complete, not implemented).
+Status: **implemented** (v0.9).
 
 This document records the decisions behind pay-per-use inference and worker
-retribution, so the eventual implementation lands in one coherent slice. It
+retribution, so the implementation and its follow-ups stay coherent. It
 builds on the per-account balance system (`billing-balances.md`) and the
-request/attribution accounting (`usage-and-accounting.md`). Nothing below is
-implemented yet.
+request/attribution accounting (`usage-and-accounting.md`).
 
 ## 1. Pricing model
 

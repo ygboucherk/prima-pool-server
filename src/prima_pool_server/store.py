@@ -150,6 +150,8 @@ CREATE TABLE IF NOT EXISTS requests (
     cluster_id       TEXT NOT NULL REFERENCES clusters(cluster_id),
     prompt_tokens    INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
+    input_cost_minor  INTEGER NOT NULL DEFAULT 0,
+    output_cost_minor INTEGER NOT NULL DEFAULT 0,
     created_at       REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_requests_account ON requests(account_id, created_at);
@@ -160,7 +162,7 @@ CREATE TABLE IF NOT EXISTS balance_events (
     event_id        TEXT PRIMARY KEY,
     account_id      TEXT NOT NULL,
     admin_account_id TEXT,
-    kind            TEXT NOT NULL CHECK (kind IN ('set', 'adjust')),
+    kind            TEXT NOT NULL CHECK (kind IN ('set', 'adjust', 'debit', 'credit')),
     delta           INTEGER NOT NULL,
     balance_before  INTEGER NOT NULL,
     balance_after   INTEGER NOT NULL,
@@ -552,6 +554,73 @@ class Store:
                 "ALTER TABLE accounts ADD COLUMN balance_minor INTEGER NOT NULL DEFAULT 0"
             )
             logger.info("migrated accounts: added column balance_minor")
+
+        # v0.9: requests gain frozen per-request costs (balance-minor units).
+        # `CREATE TABLE IF NOT EXISTS` won't add columns to a pre-existing
+        # table, so ALTER them here. Legacy rows backfill to 0 (free) via the
+        # NOT NULL DEFAULT. Idempotent via the column-presence guard.
+        rcols = {r[1] for r in self._conn.execute("PRAGMA table_info(requests)")}
+        if "input_cost_minor" not in rcols:
+            self._conn.execute(
+                "ALTER TABLE requests ADD COLUMN input_cost_minor INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("migrated requests: added column input_cost_minor")
+        if "output_cost_minor" not in rcols:
+            self._conn.execute(
+                "ALTER TABLE requests ADD COLUMN output_cost_minor INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("migrated requests: added column output_cost_minor")
+
+        # v0.9: balance_events.kind must also admit debit/credit (settlement).
+        # SQLite cannot ALTER a CHECK constraint, so rebuild the table in
+        # place when the old constraint is still present.
+        ecols = {r[1] for r in self._conn.execute("PRAGMA table_info(balance_events)")}
+        if ecols:
+            self._extend_balance_event_kinds()
+
+    def _extend_balance_event_kinds(self) -> None:
+        """Rebuild balance_events so `kind` admits debit/credit.
+
+        SQLite has no `ALTER TABLE ... DROP CONSTRAINT`; the only way to widen
+        the CHECK is to recreate the table. Preserves every row and the
+        account index. Idempotent: only runs when the table exists and the
+        legacy constraint is still in place.
+        """
+        kind_sql = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'balance_events'"
+        ).fetchone()
+        if kind_sql is None:
+            return
+        ddl = kind_sql["sql"] or ""
+        if "debit" in ddl and "credit" in ddl:
+            # Already widened (fresh DBs are created with the full CHECK).
+            return
+        self._conn.executescript(
+            """
+            ALTER TABLE balance_events RENAME TO balance_events_old;
+            CREATE TABLE balance_events (
+                event_id        TEXT PRIMARY KEY,
+                account_id      TEXT NOT NULL,
+                admin_account_id TEXT,
+                kind            TEXT NOT NULL CHECK (kind IN ('set', 'adjust', 'debit', 'credit')),
+                delta           INTEGER NOT NULL,
+                balance_before  INTEGER NOT NULL,
+                balance_after   INTEGER NOT NULL,
+                reason          TEXT,
+                created_at      REAL NOT NULL
+            );
+            INSERT INTO balance_events
+                (event_id, account_id, admin_account_id, kind, delta,
+                 balance_before, balance_after, reason, created_at)
+            SELECT event_id, account_id, admin_account_id, kind, delta,
+                   balance_before, balance_after, reason, created_at
+            FROM balance_events_old;
+            DROP TABLE balance_events_old;
+            CREATE INDEX IF NOT EXISTS idx_balance_events_account
+                ON balance_events(account_id, created_at);
+            """
+        )
+        logger.info("migrated balance_events: kind now admits debit/credit")
 
     def _populate_cluster_members_from_json(self) -> None:
         """Copy membership from the legacy JSON columns into cluster_members.
@@ -1035,8 +1104,9 @@ class Store:
                 self._conn.execute(
                     "INSERT INTO requests "
                     "(request_id, account_id, key_id, model, cluster_id, "
-                    " prompt_tokens, completion_tokens, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " prompt_tokens, completion_tokens, "
+                    " input_cost_minor, output_cost_minor, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         rec.request_id,
                         rec.account_id,
@@ -1045,6 +1115,8 @@ class Store:
                         rec.cluster_id,
                         rec.prompt_tokens,
                         rec.completion_tokens,
+                        rec.input_cost_minor,
+                        rec.output_cost_minor,
                         rec.created_at,
                     ),
                 )
@@ -1057,6 +1129,171 @@ class Store:
             (account_id, limit),
         )
         return [RequestRecord(**dict(r)) for r in rows]
+
+    def settle_request(
+        self,
+        rec: RequestRecord,
+        *,
+        worker_account_ids: dict[str, str] | None = None,
+        layer_windows: dict[str, int] | None = None,
+    ) -> None:
+        """Atomically record a request and settle its debit/credits.
+
+        One transaction under the store lock:
+          1. INSERT the request row (with frozen costs).
+          2. Debit the requesting account by `input_cost_minor +
+             output_cost_minor` (a `debit` balance event, reason = request_id).
+          3. Credit each participating worker's account by its weighted share
+             (a `credit` balance event each).
+
+        Worker credit is computed with EXACT integer division so the sum of
+        credits equals the debit (no float error):
+
+            credit(w) = (cost * layer_window(w)) // cluster_total
+            remainder  = cost - sum(credits)   # < N minor units
+            credit(head) += remainder
+
+        The head is the member at ring position 0. When the distribution is
+        unknown (`layer_windows` is None/{} or a member is missing), the cost
+        is split EQUALLY across members (the documented fallback). A cluster
+        with no members credits nothing (the user debit still applies — the
+        pool absorbs it; see docs/protocol/pay-per-use.md §10).
+
+        `worker_account_ids` maps worker_id → the account that owns it (the
+        credit goes to the worker's owner, not the requester). Passed by the
+        caller so the store needs no worker→account round-trip.
+        """
+        cost = rec.input_cost_minor + rec.output_cost_minor
+        if cost < BALANCE_MIN or cost > BALANCE_MAX:
+            raise ValueError("request cost out of 64-bit range")
+
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO requests "
+                    "(request_id, account_id, key_id, model, cluster_id, "
+                    " prompt_tokens, completion_tokens, "
+                    " input_cost_minor, output_cost_minor, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        rec.request_id,
+                        rec.account_id,
+                        rec.key_id,
+                        rec.model,
+                        rec.cluster_id,
+                        rec.prompt_tokens,
+                        rec.completion_tokens,
+                        rec.input_cost_minor,
+                        rec.output_cost_minor,
+                        rec.created_at,
+                    ),
+                )
+
+                # Debit the requester.
+                self._apply_balance_delta(
+                    self._conn, rec.account_id, -cost, kind="debit", reason=rec.request_id
+                )
+
+                # Credit the workers (weighted by layer share).
+                if cost > 0:
+                    members = [
+                        r["worker_id"]
+                        for r in self._conn.execute(
+                            "SELECT worker_id FROM cluster_members "
+                            "WHERE cluster_id = ? ORDER BY ring_position",
+                            (rec.cluster_id,),
+                        ).fetchall()
+                    ]
+                    credits = self._compute_worker_credits(
+                        cost, members, layer_windows or {}
+                    )
+                    for worker_id, amount in credits.items():
+                        if amount == 0:
+                            continue
+                        owner = (worker_account_ids or {}).get(worker_id)
+                        if owner is None:
+                            continue
+                        self._apply_balance_delta(
+                            self._conn, owner, amount, kind="credit", reason=rec.request_id
+                        )
+
+    @staticmethod
+    def _compute_worker_credits(
+        cost: int, members: list[str], layer_windows: dict[str, int]
+    ) -> dict[str, int]:
+        """Compute per-worker integer credits (see settle_request docstring).
+
+        Unknown distribution (empty `layer_windows` or any member missing from
+        it) falls back to an equal split. The head (members[0]) absorbs the
+        rounding remainder so the sum is exactly `cost`.
+        """
+        if not members:
+            return {}
+        # Determine weights. Known only when every member has a window.
+        windows = [layer_windows.get(m) for m in members]
+        if any(w is None for w in windows):
+            # Unknown distribution → equal split.
+            base, remainder = divmod(cost, len(members))
+            credits = {m: base for m in members}
+            if remainder and members:
+                credits[members[0]] += remainder
+            return credits
+        total = sum(windows)
+        if total <= 0:
+            # All-zero windows (all forwarders) → treat as unknown → equal.
+            base, remainder = divmod(cost, len(members))
+            credits = {m: base for m in members}
+            if remainder and members:
+                credits[members[0]] += remainder
+            return credits
+        credits: dict[str, int] = {}
+        for m, w in zip(members, windows):
+            credits[m] = (cost * w) // total
+        # Give the rounding remainder to the head.
+        remainder = cost - sum(credits.values())
+        if remainder and members:
+            credits[members[0]] += remainder
+        return credits
+
+    def _apply_balance_delta(
+        self,
+        conn: sqlite3.Connection,
+        account_id: str,
+        delta: int,
+        *,
+        kind: str,
+        reason: str | None,
+    ) -> None:
+        """Apply a signed balance delta + record a balance event (in-txn).
+
+        Silently skips a nonexistent account (the FK-less balance events keep
+        the audit trail only for accounts that exist). Re-checks the result
+        against the 64-bit range so a computed overflow raises ValueError
+        rather than a SQLite OverflowError.
+        """
+        row = conn.execute(
+            "SELECT balance_minor FROM accounts WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if row is None:
+            return
+        before = int(row["balance_minor"])
+        after = before + delta
+        if after < BALANCE_MIN or after > BALANCE_MAX:
+            raise ValueError("balance settlement overflows the 64-bit range")
+        conn.execute(
+            "UPDATE accounts SET balance_minor = ? WHERE account_id = ?",
+            (after, account_id),
+        )
+        self._record_balance_event(
+            conn,
+            account_id=account_id,
+            admin_account_id=None,
+            kind=kind,
+            delta=delta,
+            before=before,
+            after=after,
+            reason=reason,
+        )
 
     def list_requests_in_range(
         self, account_id: str, begin: float, end: float, limit: int = 1000
@@ -1072,20 +1309,29 @@ class Store:
 
     def usage_stats_in_range(
         self, account_id: str, begin: float, end: float
-    ) -> dict[str, tuple[int, int, int]]:
+    ) -> dict[str, tuple[int, int, int, int, int]]:
         """Aggregate an account's usage in [begin, end) per model.
 
-        Returns {model: (requests, prompt_tokens, completion_tokens)}.
+        Returns {model: (requests, prompt_tokens, completion_tokens,
+        input_cost_minor, output_cost_minor)}.
         """
         rows = self._fetch_all(
             "SELECT model, COUNT(*) AS requests, "
-            "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens "
+            "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
+            "SUM(input_cost_minor) AS input_cost_minor, "
+            "SUM(output_cost_minor) AS output_cost_minor "
             "FROM requests WHERE account_id = ? AND created_at >= ? AND created_at < ? "
             "GROUP BY model",
             (account_id, begin, end),
         )
         return {
-            r["model"]: (r["requests"], r["prompt_tokens"], r["completion_tokens"])
+            r["model"]: (
+                r["requests"],
+                r["prompt_tokens"],
+                r["completion_tokens"],
+                r["input_cost_minor"],
+                r["output_cost_minor"],
+            )
             for r in rows
         }
 
@@ -1113,6 +1359,7 @@ class Store:
         """
         sql = (
             "SELECT r.request_id, r.model, r.cluster_id, r.prompt_tokens, r.completion_tokens, "
+            "       r.input_cost_minor, r.output_cost_minor, "
             "       r.created_at, cm.worker_id, cm.layer_window, "
             "       (SELECT SUM(cm2.layer_window) FROM cluster_members cm2 "
             "         WHERE cm2.cluster_id = r.cluster_id) AS cluster_total "
@@ -1138,6 +1385,7 @@ class Store:
         an account's workers, newest first (no time filter)."""
         rows = self._fetch_all(
             "SELECT r.request_id, r.model, r.cluster_id, r.prompt_tokens, r.completion_tokens, "
+            "       r.input_cost_minor, r.output_cost_minor, "
             "       r.created_at, cm.worker_id, cm.layer_window, "
             "       (SELECT SUM(cm2.layer_window) FROM cluster_members cm2 "
             "         WHERE cm2.cluster_id = r.cluster_id) AS cluster_total "

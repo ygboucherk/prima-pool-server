@@ -540,8 +540,14 @@ def test_usage_stats_endpoint(client: TestClient, store: Store):
     assert r.status_code == 200, r.text
     stats = r.json()
     assert len(stats) == 1
-    assert stats[0]["model-a"] == {"requests": 2, "prompt_tokens": 40, "completion_tokens": 60}
-    assert stats[0]["model-b"] == {"requests": 1, "prompt_tokens": 5, "completion_tokens": 6}
+    assert stats[0]["model-a"] == {
+        "requests": 2, "prompt_tokens": 40, "completion_tokens": 60,
+        "input_cost_minor": 0, "output_cost_minor": 0,
+    }
+    assert stats[0]["model-b"] == {
+        "requests": 1, "prompt_tokens": 5, "completion_tokens": 6,
+        "input_cost_minor": 0, "output_cost_minor": 0,
+    }
 
 
 def test_usage_stats_endpoint_multiple_windows(client: TestClient, store: Store):
@@ -560,8 +566,14 @@ def test_usage_stats_endpoint_multiple_windows(client: TestClient, store: Store)
     assert r.status_code == 200, r.text
     stats = r.json()
     assert len(stats) == 2
-    assert stats[0]["model-a"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 20}
-    assert stats[1]["model-a"] == {"requests": 1, "prompt_tokens": 30, "completion_tokens": 40}
+    assert stats[0]["model-a"] == {
+        "requests": 1, "prompt_tokens": 10, "completion_tokens": 20,
+        "input_cost_minor": 0, "output_cost_minor": 0,
+    }
+    assert stats[1]["model-a"] == {
+        "requests": 1, "prompt_tokens": 30, "completion_tokens": 40,
+        "input_cost_minor": 0, "output_cost_minor": 0,
+    }
 
 
 def test_parse_sse_usage_partial_counts():

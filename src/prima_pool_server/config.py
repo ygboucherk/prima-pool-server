@@ -25,16 +25,23 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class ModelDef:
-    """A model the pool serves: a slug, its exact GGUF hash, and required memory.
+    """A model the pool serves: a slug, its exact GGUF hash, required memory,
+    and per-token prices.
 
     The GGUF hash is authoritative: a cluster only ever groups workers whose
     `gguf_sha256` matches the registered hash, so mismatched models can never
     be joined together.
+
+    `input_price` / `output_price` are per-token rates in balance-minor units
+    (10^-12 token per token). A model is free iff both prices are 0. Legacy
+    model definitions (before pay-per-use) default both to 0.
     """
 
     slug: str
     gguf_sha256: str
     required_memory_mb: int
+    input_price: int = 0
+    output_price: int = 0
 
 
 @dataclass(frozen=True)
@@ -107,13 +114,15 @@ class Settings:
 
 
 def _parse_models() -> dict[str, ModelDef]:
-    """Parse PRIMA_POOL_MODELS as 'name:gguf_sha256:required_memory_mb[, ...]'.
+    """Parse PRIMA_POOL_MODELS as 'name:gguf_sha256:required_memory_mb[:input_price:output_price][, ...]'.
 
     Example:
-      PRIMA_POOL_MODELS="llama-3.1-8b-instruct:<sha256>:16384,qwen2.5-3b:<sha256>:6144"
+      PRIMA_POOL_MODELS="llama-3.1-8b-instruct:<sha256>:16384:1000000:3000000,qwen2.5-3b:<sha256>:6144"
 
     The GGUF hash is the authoritative identity of the model — a cluster only
-    groups workers whose advertised hash matches it.
+    groups workers whose advertised hash matches it. The trailing `input_price`
+    and `output_price` are per-token rates in balance-minor units (10^-12
+    token); legacy 3-field entries default both to 0 (free).
     """
     raw = os.environ.get("PRIMA_POOL_MODELS", "demo-model:<no-hash>:4096")
     result: dict[str, ModelDef] = {}
@@ -130,9 +139,19 @@ def _parse_models() -> dict[str, ModelDef]:
             required_mb = int(parts[2]) if len(parts) > 2 else 4096
         except ValueError:
             required_mb = 4096
+        try:
+            input_price = int(parts[3]) if len(parts) > 3 else 0
+        except ValueError:
+            input_price = 0
+        try:
+            output_price = int(parts[4]) if len(parts) > 4 else 0
+        except ValueError:
+            output_price = 0
         result[name] = ModelDef(
             slug=name,
             gguf_sha256=gguf_sha256,
             required_memory_mb=required_mb,
+            input_price=input_price,
+            output_price=output_price,
         )
     return result
