@@ -125,6 +125,9 @@ These are the deliberate follow-ups the current layer is designed to serve:
 - **Worker crediting.** Credits for serving work (purpose (c)) need the
   token·layer → token conversion decided (see `usage-and-accounting.md` §1)
   and a base rate per model tier.
+
+> The full design for both is now recorded in
+> [`pay-per-use.md`](pay-per-use.md) (design only — not yet implemented).
 - **Reason/audit semantics.** Whether the owner's event view should expose the
   acting admin's identity for transparency (currently admin-only).
 - **Redenomination vs. TEXT**, when balances approach the 64-bit ceiling.
